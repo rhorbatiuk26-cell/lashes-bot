@@ -24,6 +24,22 @@ bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
 
+# ================== SMART EDIT (FIX) ==================
+async def smart_edit(cq: CallbackQuery, text: str, reply_markup=None):
+    """
+    Якщо повідомлення було текстове -> edit_text
+    Якщо це фото/медіа -> edit_caption
+    Якщо Telegram не дає редагувати -> надсилаємо нове повідомлення
+    """
+    try:
+        if cq.message.text is not None:
+            await cq.message.edit_text(text, reply_markup=reply_markup)
+        else:
+            await cq.message.edit_caption(caption=text, reply_markup=reply_markup)
+    except Exception:
+        await cq.message.answer(text, reply_markup=reply_markup)
+
+
 # ================== HELPERS ==================
 def is_admin(user) -> bool:
     u = (user.username or "").lstrip("@")
@@ -39,9 +55,6 @@ def clean_phone(s: str):
     if len(digits) < 10 or len(digits) > 15:
         return None
     return s2
-
-def is_date(s: str) -> bool:
-    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", s))
 
 def is_time(s: str) -> bool:
     return bool(re.fullmatch(r"\d{2}:\d{2}", s))
@@ -113,7 +126,6 @@ async def db_get_open_times_for_date(date_: str):
         return [r[0] for r in rows]
 
 async def db_open_days_in_month(y: int, m: int) -> set[int]:
-    # дні, де є хоча б 1 відкритий слот
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
             SELECT DISTINCT date FROM slots
@@ -176,12 +188,6 @@ def ym_add(y: int, m: int, delta: int):
     return y2, m2
 
 def build_month_kb(prefix: str, y: int, m: int, enabled_days: set[int]):
-    """
-    prefix:
-      booking calendar: 'calb' -> calb:nav:YYYY-MM / calb:day:YYYY-MM-DD
-      admin calendar:   'cala' -> cala:nav:YYYY-MM / cala:day:YYYY-MM-DD
-    enabled_days: дні, які можна натискати
-    """
     kb = InlineKeyboardBuilder()
 
     prev_y, prev_m = ym_add(y, m, -1)
@@ -307,7 +313,7 @@ async def menu_home(cq: CallbackQuery):
         "Запис онлайн на процедури.\n"
         "Оберіть дію нижче 👇"
     )
-    await cq.message.edit_text(text, reply_markup=main_menu_kb(is_admin(cq.from_user)))
+    await smart_edit(cq, text, reply_markup=main_menu_kb(is_admin(cq.from_user)))
     await cq.answer()
 
 
@@ -317,7 +323,7 @@ async def admin_menu(cq: CallbackQuery):
     if not is_admin(cq.from_user):
         await cq.answer("Немає доступу", show_alert=True)
         return
-    await cq.message.edit_text("🛠 Адмін\n\nКалендар слотів:", reply_markup=kb_admin())
+    await smart_edit(cq, "🛠 Адмін\n\nКалендар слотів:", reply_markup=kb_admin())
     await cq.answer()
 
 async def show_admin_calendar(cq: CallbackQuery, y: int | None = None, m: int | None = None):
@@ -325,11 +331,11 @@ async def show_admin_calendar(cq: CallbackQuery, y: int | None = None, m: int | 
     y = y or today.year
     m = m or today.month
 
-    # для адміна дозволяємо натискати всі дні місяця (щоб додати слоти навіть якщо їх ще немає)
     _, last_day = calendar.monthrange(y, m)
     enabled_days = set(range(1, last_day + 1))
 
-    await cq.message.edit_text(
+    await smart_edit(
+        cq,
         "📅 Оберіть дату (адмін):",
         reply_markup=build_month_kb("cala", y, m, enabled_days)
     )
@@ -362,7 +368,8 @@ async def cala_pick_day(cq: CallbackQuery):
     times = await db_get_times_for_date(date_)
     open_times = set(await db_get_open_times_for_date(date_))
 
-    await cq.message.edit_text(
+    await smart_edit(
+        cq,
         f"📅 {date_}\n\nНатискай час: ✅ відкрито / ❌ закрито",
         reply_markup=kb_admin_times(date_, times, open_times)
     )
@@ -375,7 +382,7 @@ async def admin_add_time_start(cq: CallbackQuery):
         return
     date_ = cq.data.split(":", 2)[2]
     ADMIN_FLOW[cq.from_user.id] = {"step": "time", "date": date_}
-    await cq.message.edit_text(f"📅 {date_}\n\nВведіть час HH:MM (наприклад 14:30):")
+    await smart_edit(cq, f"📅 {date_}\n\nВведіть час HH:MM (наприклад 14:30):")
     await cq.answer()
 
 @dp.callback_query(F.data.startswith("adm:toggle:"))
@@ -391,7 +398,8 @@ async def admin_toggle_slot(cq: CallbackQuery):
 
     times = await db_get_times_for_date(date_)
     open_times = set(await db_get_open_times_for_date(date_))
-    await cq.message.edit_text(
+    await smart_edit(
+        cq,
         f"📅 {date_}\n\nНатискай час: ✅ відкрито / ❌ закрито",
         reply_markup=kb_admin_times(date_, times, open_times)
     )
@@ -401,7 +409,7 @@ async def admin_toggle_slot(cq: CallbackQuery):
 @dp.callback_query(F.data == "menu:book")
 async def start_booking(cq: CallbackQuery):
     BOOKING[cq.from_user.id] = BookingState()
-    await cq.message.edit_text("Оберіть послугу 👇", reply_markup=kb_services())
+    await smart_edit(cq, "Оберіть послугу 👇", reply_markup=kb_services())
     await cq.answer()
 
 @dp.callback_query(F.data.startswith("bk:svc:"))
@@ -418,7 +426,7 @@ async def choose_service(cq: CallbackQuery):
     st.step = None
 
     if st.service == "Нарощування":
-        await cq.message.edit_text("Оберіть тип нарощування 👇", reply_markup=kb_ext_types())
+        await smart_edit(cq, "Оберіть тип нарощування 👇", reply_markup=kb_ext_types())
     else:
         await show_booking_calendar(cq)
     await cq.answer()
@@ -439,7 +447,8 @@ async def show_booking_calendar(cq: CallbackQuery, y: int | None = None, m: int 
     m = m or today.month
 
     enabled_days = await db_open_days_in_month(y, m)
-    await cq.message.edit_text(
+    await smart_edit(
+        cq,
         "Оберіть дату 📅\n(·дні — недоступні):",
         reply_markup=build_month_kb("calb", y, m, enabled_days)
     )
@@ -465,12 +474,12 @@ async def calb_pick_day(cq: CallbackQuery):
         return
 
     st.date = date_
-    await cq.message.edit_text(f"Оберіть час 🕒 ({date_})", reply_markup=kb_times_booking(date_, times))
+    await smart_edit(cq, f"Оберіть час 🕒 ({date_})", reply_markup=kb_times_booking(date_, times))
     await cq.answer()
 
 @dp.callback_query(F.data == "bk:back:services")
 async def back_services(cq: CallbackQuery):
-    await cq.message.edit_text("Оберіть послугу 👇", reply_markup=kb_services())
+    await smart_edit(cq, "Оберіть послугу 👇", reply_markup=kb_services())
     await cq.answer()
 
 @dp.callback_query(F.data == "bk:back:calendar")
@@ -497,7 +506,7 @@ async def choose_time(cq: CallbackQuery):
     st.time = time_
     st.step = "name"
 
-    await cq.message.edit_text("✍️ Вкажіть ваше імʼя:")
+    await smart_edit(cq, "✍️ Вкажіть ваше імʼя:")
     await cq.answer()
 
 @dp.callback_query(F.data == "bk:change:time")
@@ -507,13 +516,13 @@ async def change_time(cq: CallbackQuery):
         await cq.answer("Немає вибраної дати", show_alert=True)
         return
     times = await db_get_open_times_for_date(st.date)
-    await cq.message.edit_text(f"Оберіть інший час 🕒 ({st.date})", reply_markup=kb_times_booking(st.date, times))
+    await smart_edit(cq, f"Оберіть інший час 🕒 ({st.date})", reply_markup=kb_times_booking(st.date, times))
     await cq.answer()
 
 @dp.callback_query(F.data == "bk:cancel")
 async def book_cancel(cq: CallbackQuery):
     BOOKING.pop(cq.from_user.id, None)
-    await cq.message.edit_text("Запис скасовано.", reply_markup=main_menu_kb(is_admin(cq.from_user)))
+    await smart_edit(cq, "Запис скасовано.", reply_markup=main_menu_kb(is_admin(cq.from_user)))
     await cq.answer()
 
 @dp.callback_query(F.data == "bk:confirm")
@@ -531,15 +540,15 @@ async def book_confirm(cq: CallbackQuery):
     app_id = await db_create_appointment(st, cq.from_user.id, cq.from_user.username or "")
     BOOKING.pop(cq.from_user.id, None)
 
-    await cq.message.edit_text(
+    msg = (
         "✅ Запис підтверджено!\n\n"
         f"№ {app_id}\n"
         f"👤 {st.client_name}\n📞 {st.phone}\n"
         f"📌 {st.service}{' ('+st.subtype+')' if st.subtype else ''}\n"
         f"📅 {st.date}\n🕒 {st.time}\n\n"
-        "До зустрічі ✨",
-        reply_markup=main_menu_kb(is_admin(cq.from_user))
+        "До зустрічі ✨"
     )
+    await smart_edit(cq, msg, reply_markup=main_menu_kb(is_admin(cq.from_user)))
     await cq.answer()
 
 
@@ -597,7 +606,7 @@ async def input_router(message: Message):
 async def my_appointments(cq: CallbackQuery):
     rows = await db_my_appointments(cq.from_user.id)
     if not rows:
-        await cq.message.edit_text("У вас поки немає записів.", reply_markup=main_menu_kb(is_admin(cq.from_user)))
+        await smart_edit(cq, "У вас поки немає записів.", reply_markup=main_menu_kb(is_admin(cq.from_user)))
         await cq.answer()
         return
 
@@ -606,11 +615,11 @@ async def my_appointments(cq: CallbackQuery):
         s = f"{svc}" + (f" ({sub})" if sub else "")
         lines.append(f"— #{app_id} • {d} {t} • {s} • {status}")
 
-    await cq.message.edit_text("\n".join(lines), reply_markup=main_menu_kb(is_admin(cq.from_user)))
+    await smart_edit(cq, "\n".join(lines), reply_markup=main_menu_kb(is_admin(cq.from_user)))
     await cq.answer()
 
 
-# ================== NOOP HANDLER (for calendar headers/empty cells) ==================
+# ================== NOOP HANDLER ==================
 @dp.callback_query(F.data.endswith(":noop"))
 async def noop(cq: CallbackQuery):
     await cq.answer()
