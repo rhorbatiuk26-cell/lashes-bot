@@ -1,3 +1,4 @@
+from aiogram.types import FSInputFile
 import asyncio
 import os
 import re
@@ -21,7 +22,22 @@ dp = Dispatcher()
 # ===== TEST /start =====
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    await message.answer("✅ Бот онлайн на Railway. /start працює!")
+    BOOKING.pop(message.from_user.id, None)
+    ADMIN_FLOW.pop(message.from_user.id, None)
+
+    photo = FSInputFile("assets/welcome.jpg")
+
+    text = (
+        "Lash Studio ✨\n\n"
+        "Запис онлайн на процедури.\n"
+        "Оберіть дію нижче 👇"
+    )
+
+    await message.answer_photo(
+        photo=photo,
+        caption=text,
+        reply_markup=main_menu_kb(is_admin_user(message.from_user))
+    )
 
 # ===== ADMINS =====
 ADMIN_USERNAMES = {
