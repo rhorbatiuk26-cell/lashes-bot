@@ -1,8 +1,9 @@
 import asyncio
 import os
 import re
+import calendar
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, date
 
 import aiosqlite
 from aiogram import Bot, Dispatcher, F
@@ -16,9 +17,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
     raise RuntimeError("BOT_TOKEN is not set in Railway Variables")
 
-# Адміни (username без @)
-ADMIN_USERNAMES = {"roman2696", "Ekaterinahorbatiuk"}
-
+ADMIN_USERNAMES = {"roman2696", "Ekaterinahorbatiuk"}  # username без @
 DB_PATH = "lashes_bot.sqlite3"
 
 bot = Bot(token=BOT_TOKEN)
@@ -76,77 +75,66 @@ async def db_init():
         """)
         await db.commit()
 
-async def db_add_slot(date: str, time: str):
+async def db_add_slot(date_: str, time_: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        # якщо такий слот вже є — просто відкриємо його
-        cur = await db.execute("SELECT id FROM slots WHERE date=? AND time=?", (date, time))
+        cur = await db.execute("SELECT id FROM slots WHERE date=? AND time=?", (date_, time_))
         row = await cur.fetchone()
         if row:
             await db.execute("UPDATE slots SET is_open=1 WHERE id=?", (row[0],))
         else:
-            await db.execute(
-                "INSERT INTO slots(date, time, is_open) VALUES(?,?,1)",
-                (date, time)
-            )
+            await db.execute("INSERT INTO slots(date, time, is_open) VALUES(?,?,1)", (date_, time_))
         await db.commit()
 
-async def db_toggle_slot(date: str, time: str):
+async def db_toggle_slot(date_: str, time_: str) -> int:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT id, is_open FROM slots WHERE date=? AND time=?", (date, time))
+        cur = await db.execute("SELECT id, is_open FROM slots WHERE date=? AND time=?", (date_, time_))
         row = await cur.fetchone()
         if row:
             slot_id, is_open = row
             new_val = 0 if is_open == 1 else 1
             await db.execute("UPDATE slots SET is_open=? WHERE id=?", (new_val, slot_id))
             await db.commit()
-            return new_val  # 1=open, 0=closed
+            return new_val
         else:
-            await db.execute("INSERT INTO slots(date, time, is_open) VALUES(?,?,1)", (date, time))
+            await db.execute("INSERT INTO slots(date, time, is_open) VALUES(?,?,1)", (date_, time_))
             await db.commit()
             return 1
 
-async def db_get_all_dates():
+async def db_get_times_for_date(date_: str):
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("SELECT DISTINCT date FROM slots ORDER BY date")
+        cur = await db.execute("SELECT time FROM slots WHERE date=? ORDER BY time", (date_,))
         rows = await cur.fetchall()
         return [r[0] for r in rows]
 
-async def db_get_dates_with_open_slots():
+async def db_get_open_times_for_date(date_: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        cur = await db.execute("SELECT time FROM slots WHERE date=? AND is_open=1 ORDER BY time", (date_,))
+        rows = await cur.fetchall()
+        return [r[0] for r in rows]
+
+async def db_open_days_in_month(y: int, m: int) -> set[int]:
+    # дні, де є хоча б 1 відкритий слот
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
             SELECT DISTINCT date FROM slots
-            WHERE is_open=1
+            WHERE is_open=1 AND substr(date,1,7)=?
             ORDER BY date
-        """)
+        """, (f"{y:04d}-{m:02d}",))
         rows = await cur.fetchall()
-        return [r[0] for r in rows]
+        days = set()
+        for (dstr,) in rows:
+            try:
+                days.add(int(dstr.split("-")[2]))
+            except:
+                pass
+        return days
 
-async def db_get_times_for_date(date: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("""
-            SELECT time FROM slots
-            WHERE date=? 
-            ORDER BY time
-        """, (date,))
-        rows = await cur.fetchall()
-        return [r[0] for r in rows]
-
-async def db_get_open_times_for_date(date: str):
-    async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("""
-            SELECT time FROM slots
-            WHERE date=? AND is_open=1
-            ORDER BY time
-        """, (date,))
-        rows = await cur.fetchall()
-        return [r[0] for r in rows]
-
-async def db_is_slot_free(date: str, time: str) -> bool:
+async def db_is_slot_free(date_: str, time_: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("""
             SELECT COUNT(*) FROM appointments
             WHERE date=? AND time=? AND status='booked'
-        """, (date, time))
+        """, (date_, time_))
         c = (await cur.fetchone())[0]
         return c == 0
 
@@ -180,6 +168,47 @@ async def db_my_appointments(user_id: int):
         return await cur.fetchall()
 
 
+# ================== CALENDAR UI ==================
+def ym_add(y: int, m: int, delta: int):
+    m2 = m + delta
+    y2 = y + (m2 - 1) // 12
+    m2 = (m2 - 1) % 12 + 1
+    return y2, m2
+
+def build_month_kb(prefix: str, y: int, m: int, enabled_days: set[int]):
+    """
+    prefix:
+      booking calendar: 'calb' -> calb:nav:YYYY-MM / calb:day:YYYY-MM-DD
+      admin calendar:   'cala' -> cala:nav:YYYY-MM / cala:day:YYYY-MM-DD
+    enabled_days: дні, які можна натискати
+    """
+    kb = InlineKeyboardBuilder()
+
+    prev_y, prev_m = ym_add(y, m, -1)
+    next_y, next_m = ym_add(y, m, +1)
+
+    kb.button(text="◀︎", callback_data=f"{prefix}:nav:{prev_y:04d}-{prev_m:02d}")
+    kb.button(text=f"{calendar.month_name[m]} {y}", callback_data=f"{prefix}:noop")
+    kb.button(text="▶︎", callback_data=f"{prefix}:nav:{next_y:04d}-{next_m:02d}")
+
+    for wd in ["Пн","Вт","Ср","Чт","Пт","Сб","Нд"]:
+        kb.button(text=wd, callback_data=f"{prefix}:noop")
+
+    cal = calendar.Calendar(firstweekday=0)
+    for week in cal.monthdayscalendar(y, m):
+        for d in week:
+            if d == 0:
+                kb.button(text=" ", callback_data=f"{prefix}:noop")
+            else:
+                if d in enabled_days:
+                    kb.button(text=str(d), callback_data=f"{prefix}:day:{y:04d}-{m:02d}-{d:02d}")
+                else:
+                    kb.button(text=f"·{d}", callback_data=f"{prefix}:noop")
+
+    kb.adjust(3, 7, 7, 7, 7, 7, 7)
+    return kb.as_markup()
+
+
 # ================== UI (KEYBOARDS) ==================
 def main_menu_kb(is_admin_flag: bool):
     kb = InlineKeyboardBuilder()
@@ -207,19 +236,11 @@ def kb_ext_types():
     kb.adjust(2, 1, 1)
     return kb.as_markup()
 
-def kb_dates(dates: list[str]):
-    kb = InlineKeyboardBuilder()
-    for d in dates[:20]:
-        kb.button(text=f"📅 {d}", callback_data=f"bk:date:{d}")
-    kb.button(text="⬅️ Назад", callback_data="bk:back:services")
-    kb.adjust(2, 1)
-    return kb.as_markup()
-
-def kb_times(date: str, times: list[str]):
+def kb_times_booking(date_: str, times: list[str]):
     kb = InlineKeyboardBuilder()
     for t in times[:48]:
-        kb.button(text=f"🕒 {t}", callback_data=f"bk:time:{date}|{t}")
-    kb.button(text="⬅️ Назад", callback_data=f"bk:back:dates:{date}")
+        kb.button(text=f"🕒 {t}", callback_data=f"bk:time:{date_}|{t}")
+    kb.button(text="⬅️ Назад", callback_data="bk:back:calendar")
     kb.adjust(4, 4, 4, 4, 4, 1)
     return kb.as_markup()
 
@@ -233,33 +254,23 @@ def kb_confirm():
 
 def kb_admin():
     kb = InlineKeyboardBuilder()
-    kb.button(text="📅 Слоти (кнопками)", callback_data="adm:slots")
-    kb.button(text="➕ Додати слот (командою)", callback_data="adm:help_addslot")
+    kb.button(text="📅 Календар слотів", callback_data="adm:calendar")
     kb.button(text="⬅️ Назад", callback_data="menu:home")
     kb.adjust(1)
     return kb.as_markup()
 
-def kb_admin_dates(dates: list[str]):
+def kb_admin_times(date_: str, times: list[str], open_times: set[str]):
     kb = InlineKeyboardBuilder()
-    for d in dates[:20]:
-        kb.button(text=f"📅 {d}", callback_data=f"adm:date:{d}")
-    kb.button(text="➕ Додати нову дату", callback_data="adm:newdate")
-    kb.button(text="⬅️ Назад", callback_data="menu:admin")
-    kb.adjust(2, 1, 1)
-    return kb.as_markup()
-
-def kb_admin_times(date: str, times: list[str], open_times: set[str]):
-    kb = InlineKeyboardBuilder()
-    for t in times[:48]:
+    for t in times[:60]:
         mark = "✅" if t in open_times else "❌"
-        kb.button(text=f"{mark} {t}", callback_data=f"adm:toggle:{date}|{t}")
-    kb.button(text="➕ Додати час", callback_data=f"adm:addtime:{date}")
-    kb.button(text="⬅️ Назад", callback_data="adm:slots")
-    kb.adjust(4, 4, 4, 4, 4, 1, 1)
+        kb.button(text=f"{mark} {t}", callback_data=f"adm:toggle:{date_}|{t}")
+    kb.button(text="➕ Додати час", callback_data=f"adm:addtime:{date_}")
+    kb.button(text="⬅️ Назад", callback_data="adm:calendar")
+    kb.adjust(4, 4, 4, 4, 4, 4, 1, 1)
     return kb.as_markup()
 
 
-# ================== BOOKING STATE ==================
+# ================== STATE ==================
 @dataclass
 class BookingState:
     service: str | None = None
@@ -271,15 +282,12 @@ class BookingState:
     step: str | None = None  # "name" або "phone"
 
 BOOKING: dict[int, BookingState] = {}
-
-# Адмін-потік (ввід дати/часу текстом)
-ADMIN_FLOW: dict[int, dict] = {}
+ADMIN_FLOW: dict[int, dict] = {}  # {admin_id: {"step": "time", "date": "YYYY-MM-DD"}}
 
 
 # ================== START (PHOTO + TEXT) ==================
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    # Фото має бути в assets/welcome.jpg
     photo = FSInputFile("assets/welcome.jpg")
     text = (
         "Lash Studio ✨\n\n"
@@ -303,84 +311,60 @@ async def menu_home(cq: CallbackQuery):
     await cq.answer()
 
 
-# ================== ADMIN ==================
+# ================== ADMIN (CALENDAR) ==================
 @dp.callback_query(F.data == "menu:admin")
 async def admin_menu(cq: CallbackQuery):
     if not is_admin(cq.from_user):
         await cq.answer("Немає доступу", show_alert=True)
         return
+    await cq.message.edit_text("🛠 Адмін\n\nКалендар слотів:", reply_markup=kb_admin())
+    await cq.answer()
+
+async def show_admin_calendar(cq: CallbackQuery, y: int | None = None, m: int | None = None):
+    today = date.today()
+    y = y or today.year
+    m = m or today.month
+
+    # для адміна дозволяємо натискати всі дні місяця (щоб додати слоти навіть якщо їх ще немає)
+    _, last_day = calendar.monthrange(y, m)
+    enabled_days = set(range(1, last_day + 1))
+
     await cq.message.edit_text(
-        "🛠 Адмін\n\n"
-        "Тут ти відкриваєш віконця для запису.\n"
-        "Найзручніше: «Слоти (кнопками)».",
-        reply_markup=kb_admin()
+        "📅 Оберіть дату (адмін):",
+        reply_markup=build_month_kb("cala", y, m, enabled_days)
     )
-    await cq.answer()
 
-@dp.callback_query(F.data == "adm:help_addslot")
-async def admin_help_addslot(cq: CallbackQuery):
+@dp.callback_query(F.data == "adm:calendar")
+async def admin_calendar_entry(cq: CallbackQuery):
     if not is_admin(cq.from_user):
         await cq.answer("Немає доступу", show_alert=True)
         return
-    await cq.message.edit_text(
-        "➕ Додати слот (командою)\n\n"
-        "Формат:\n"
-        "`/addslot 2026-02-05 14:30`\n\n"
-        "Але краще — «Слоти (кнопками)».",
-        reply_markup=kb_admin(),
-        parse_mode="Markdown"
-    )
+    await show_admin_calendar(cq)
     await cq.answer()
 
-@dp.message(Command("addslot"))
-async def cmd_addslot(message: Message):
-    if not is_admin(message.from_user):
-        return
-    parts = (message.text or "").split()
-    if len(parts) != 3:
-        await message.answer("Формат: /addslot YYYY-MM-DD HH:MM\nПриклад: /addslot 2026-02-05 14:30")
-        return
-    d, t = parts[1], parts[2]
-    if not is_date(d) or not is_time(t):
-        await message.answer("Невірний формат. Приклад: /addslot 2026-02-05 14:30")
-        return
-    await db_add_slot(d, t)
-    await message.answer(f"✅ Додано слот: {d} {t}")
-
-# --- Admin slots by buttons ---
-@dp.callback_query(F.data == "adm:slots")
-async def admin_slots(cq: CallbackQuery):
+@dp.callback_query(F.data.startswith("cala:nav:"))
+async def cala_nav(cq: CallbackQuery):
     if not is_admin(cq.from_user):
         await cq.answer("Немає доступу", show_alert=True)
         return
-    dates = await db_get_all_dates()
-    await cq.message.edit_text(
-        "📅 Слоти\n\nОбери дату або додай нову:",
-        reply_markup=kb_admin_dates(dates)
-    )
+    ym = cq.data.split(":", 2)[2]
+    y, m = map(int, ym.split("-"))
+    await show_admin_calendar(cq, y, m)
     await cq.answer()
 
-@dp.callback_query(F.data == "adm:newdate")
-async def admin_newdate(cq: CallbackQuery):
+@dp.callback_query(F.data.startswith("cala:day:"))
+async def cala_pick_day(cq: CallbackQuery):
     if not is_admin(cq.from_user):
         await cq.answer("Немає доступу", show_alert=True)
         return
-    ADMIN_FLOW[cq.from_user.id] = {"step": "date"}
-    await cq.message.edit_text("Введи дату у форматі YYYY-MM-DD (наприклад 2026-02-05):")
-    await cq.answer()
+    date_ = cq.data.split(":", 2)[2]
 
-@dp.callback_query(F.data.startswith("adm:date:"))
-async def admin_pick_date(cq: CallbackQuery):
-    if not is_admin(cq.from_user):
-        await cq.answer("Немає доступу", show_alert=True)
-        return
-    date = cq.data.split(":", 2)[2]
-    times = await db_get_times_for_date(date)
-    open_times = set(await db_get_open_times_for_date(date))
+    times = await db_get_times_for_date(date_)
+    open_times = set(await db_get_open_times_for_date(date_))
 
     await cq.message.edit_text(
-        f"📅 {date}\n\nНатискай на час — відкриє/закриє слот ✅/❌",
-        reply_markup=kb_admin_times(date, times, open_times)
+        f"📅 {date_}\n\nНатискай час: ✅ відкрито / ❌ закрито",
+        reply_markup=kb_admin_times(date_, times, open_times)
     )
     await cq.answer()
 
@@ -389,11 +373,9 @@ async def admin_add_time_start(cq: CallbackQuery):
     if not is_admin(cq.from_user):
         await cq.answer("Немає доступу", show_alert=True)
         return
-    date = cq.data.split(":", 2)[2]
-    ADMIN_FLOW[cq.from_user.id] = {"step": "time", "date": date}
-    await cq.message.edit_text(
-        f"📅 {date}\n\nВведи час у форматі HH:MM (наприклад 14:30):"
-    )
+    date_ = cq.data.split(":", 2)[2]
+    ADMIN_FLOW[cq.from_user.id] = {"step": "time", "date": date_}
+    await cq.message.edit_text(f"📅 {date_}\n\nВведіть час HH:MM (наприклад 14:30):")
     await cq.answer()
 
 @dp.callback_query(F.data.startswith("adm:toggle:"))
@@ -401,22 +383,21 @@ async def admin_toggle_slot(cq: CallbackQuery):
     if not is_admin(cq.from_user):
         await cq.answer("Немає доступу", show_alert=True)
         return
-
     payload = cq.data.split(":", 2)[2]
-    date, time = payload.split("|", 1)
+    date_, time_ = payload.split("|", 1)
 
-    new_val = await db_toggle_slot(date, time)
+    new_val = await db_toggle_slot(date_, time_)
     await cq.answer("✅ Відкрито" if new_val == 1 else "❌ Закрито")
 
-    times = await db_get_times_for_date(date)
-    open_times = set(await db_get_open_times_for_date(date))
+    times = await db_get_times_for_date(date_)
+    open_times = set(await db_get_open_times_for_date(date_))
     await cq.message.edit_text(
-        f"📅 {date}\n\nНатискай на час — відкриє/закриє слот ✅/❌",
-        reply_markup=kb_admin_times(date, times, open_times)
+        f"📅 {date_}\n\nНатискай час: ✅ відкрито / ❌ закрито",
+        reply_markup=kb_admin_times(date_, times, open_times)
     )
 
 
-# ================== BOOKING FLOW ==================
+# ================== BOOKING FLOW (WITH CALENDAR) ==================
 @dp.callback_query(F.data == "menu:book")
 async def start_booking(cq: CallbackQuery):
     BOOKING[cq.from_user.id] = BookingState()
@@ -439,7 +420,7 @@ async def choose_service(cq: CallbackQuery):
     if st.service == "Нарощування":
         await cq.message.edit_text("Оберіть тип нарощування 👇", reply_markup=kb_ext_types())
     else:
-        await show_booking_dates(cq)
+        await show_booking_calendar(cq)
     await cq.answer()
 
 @dp.callback_query(F.data.startswith("bk:sub:"))
@@ -449,32 +430,52 @@ async def choose_subtype(cq: CallbackQuery):
         await cq.answer("Натисніть /start", show_alert=True)
         return
     st.subtype = cq.data.split(":", 2)[2]
-    await show_booking_dates(cq)
+    await show_booking_calendar(cq)
     await cq.answer()
 
-async def show_booking_dates(cq: CallbackQuery):
-    dates = await db_get_dates_with_open_slots()
-    if not dates:
-        await cq.message.edit_text(
-            "Поки що немає відкритих віконець 😔\n\n"
-            "Адміну треба відкрити слоти в адмінці.",
-            reply_markup=kb_services()
-        )
-        return
-    await cq.message.edit_text("Оберіть дату 📅", reply_markup=kb_dates(dates))
+async def show_booking_calendar(cq: CallbackQuery, y: int | None = None, m: int | None = None):
+    today = date.today()
+    y = y or today.year
+    m = m or today.month
 
-@dp.callback_query(F.data.startswith("bk:date:"))
-async def choose_date(cq: CallbackQuery):
+    enabled_days = await db_open_days_in_month(y, m)
+    await cq.message.edit_text(
+        "Оберіть дату 📅\n(·дні — недоступні):",
+        reply_markup=build_month_kb("calb", y, m, enabled_days)
+    )
+
+@dp.callback_query(F.data.startswith("calb:nav:"))
+async def calb_nav(cq: CallbackQuery):
+    ym = cq.data.split(":", 2)[2]
+    y, m = map(int, ym.split("-"))
+    await show_booking_calendar(cq, y, m)
+    await cq.answer()
+
+@dp.callback_query(F.data.startswith("calb:day:"))
+async def calb_pick_day(cq: CallbackQuery):
     st = BOOKING.get(cq.from_user.id)
     if not st:
         await cq.answer("Натисніть /start", show_alert=True)
         return
-    st.date = cq.data.split(":", 2)[2]
-    times = await db_get_open_times_for_date(st.date)
+
+    date_ = cq.data.split(":", 2)[2]
+    times = await db_get_open_times_for_date(date_)
     if not times:
-        await cq.message.edit_text("На цю дату немає відкритих слотів.", reply_markup=kb_dates(await db_get_dates_with_open_slots()))
+        await cq.answer("На цю дату немає відкритих слотів", show_alert=True)
         return
-    await cq.message.edit_text("Оберіть час 🕒", reply_markup=kb_times(st.date, times))
+
+    st.date = date_
+    await cq.message.edit_text(f"Оберіть час 🕒 ({date_})", reply_markup=kb_times_booking(date_, times))
+    await cq.answer()
+
+@dp.callback_query(F.data == "bk:back:services")
+async def back_services(cq: CallbackQuery):
+    await cq.message.edit_text("Оберіть послугу 👇", reply_markup=kb_services())
+    await cq.answer()
+
+@dp.callback_query(F.data == "bk:back:calendar")
+async def back_calendar(cq: CallbackQuery):
+    await show_booking_calendar(cq)
     await cq.answer()
 
 @dp.callback_query(F.data.startswith("bk:time:"))
@@ -485,28 +486,18 @@ async def choose_time(cq: CallbackQuery):
         return
 
     payload = cq.data.split(":", 2)[2]
-    date, time = payload.split("|", 1)
+    date_, time_ = payload.split("|", 1)
 
-    ok = await db_is_slot_free(date, time)
+    ok = await db_is_slot_free(date_, time_)
     if not ok:
         await cq.answer("Цей час вже зайнятий 😔", show_alert=True)
         return
 
-    st.date = date
-    st.time = time
-
+    st.date = date_
+    st.time = time_
     st.step = "name"
+
     await cq.message.edit_text("✍️ Вкажіть ваше імʼя:")
-    await cq.answer()
-
-@dp.callback_query(F.data == "bk:back:services")
-async def back_services(cq: CallbackQuery):
-    await cq.message.edit_text("Оберіть послугу 👇", reply_markup=kb_services())
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("bk:back:dates:"))
-async def back_dates(cq: CallbackQuery):
-    await show_booking_dates(cq)
     await cq.answer()
 
 @dp.callback_query(F.data == "bk:change:time")
@@ -516,7 +507,7 @@ async def change_time(cq: CallbackQuery):
         await cq.answer("Немає вибраної дати", show_alert=True)
         return
     times = await db_get_open_times_for_date(st.date)
-    await cq.message.edit_text("Оберіть інший час 🕒", reply_markup=kb_times(st.date, times))
+    await cq.message.edit_text(f"Оберіть інший час 🕒 ({st.date})", reply_markup=kb_times_booking(st.date, times))
     await cq.answer()
 
 @dp.callback_query(F.data == "bk:cancel")
@@ -552,35 +543,24 @@ async def book_confirm(cq: CallbackQuery):
     await cq.answer()
 
 
-# ================== INPUT ROUTER (ADMIN + BOOKING) ==================
+# ================== INPUT ROUTER (ADMIN time + BOOKING name/phone) ==================
 @dp.message()
 async def input_router(message: Message):
     text = (message.text or "").strip()
 
-    # --- ADMIN FLOW (дата/час) ---
+    # --- ADMIN: add time after calendar date selected ---
     if is_admin(message.from_user) and message.from_user.id in ADMIN_FLOW:
         flow = ADMIN_FLOW[message.from_user.id]
-        step = flow.get("step")
-
-        if step == "date":
-            if not is_date(text):
-                await message.answer("❌ Невірно. Формат: YYYY-MM-DD (наприклад 2026-02-05)")
-                return
-            flow["date"] = text
-            flow["step"] = "time"
-            await message.answer(f"✅ Дата {text} збережена.\nТепер введи час HH:MM (наприклад 14:30):")
-            return
-
-        if step == "time":
-            date = flow.get("date")
+        if flow.get("step") == "time":
+            date_ = flow.get("date")
             if not is_time(text):
                 await message.answer("❌ Невірно. Формат: HH:MM (наприклад 14:30)")
                 return
-            await db_add_slot(date, text)
-            await message.answer(f"✅ Додано слот: {date} {text}\n\nМожеш вводити наступний час або натисни /start")
+            await db_add_slot(date_, text)
+            await message.answer(f"✅ Додано слот: {date_} {text}\nМожеш вводити наступний час або відкрий календар слотів ще раз.")
             return
 
-    # --- BOOKING FLOW (ім'я/телефон) ---
+    # --- BOOKING: name/phone ---
     st = BOOKING.get(message.from_user.id)
     if not st or not st.step:
         return
@@ -625,7 +605,14 @@ async def my_appointments(cq: CallbackQuery):
     for app_id, d, t, svc, sub, status in rows:
         s = f"{svc}" + (f" ({sub})" if sub else "")
         lines.append(f"— #{app_id} • {d} {t} • {s} • {status}")
+
     await cq.message.edit_text("\n".join(lines), reply_markup=main_menu_kb(is_admin(cq.from_user)))
+    await cq.answer()
+
+
+# ================== NOOP HANDLER (for calendar headers/empty cells) ==================
+@dp.callback_query(F.data.endswith(":noop"))
+async def noop(cq: CallbackQuery):
     await cq.answer()
 
 
@@ -637,6 +624,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
-
