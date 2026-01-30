@@ -1,39 +1,30 @@
 import asyncio
-import re
 import os
-from datetime import datetime
+import re
 from typing import Optional
+from datetime import datetime
 
+from aiogram import Bot, Dispatcher
 import aiosqlite
-from aiogram import Bot, Dispatcher, F
-from aiogram.filters import Command
-from aiogram.types import Message, CallbackQuery
-from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-
-print("=== BOT STARTING ===", flush=True)
-
-# --- TOKEN ---
+# ====== TOKEN ======
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-print("BOT_TOKEN exists:", bool(BOT_TOKEN), flush=True)
-
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set. Add it in Railway Variables.")
+    raise RuntimeError("BOT_TOKEN is not set")
 
-# --- BOT / DISPATCHER ---
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
-# --- ADMINS (usernames without @) ---
+# ====== ADMINS ======
 ADMIN_USERNAMES = {
     "roman2696",
     "Ekaterinahorbatiuk"
 }
 
-# --- DATABASE ---
+# ====== DATABASE ======
 DB_PATH = "lashes_bot.sqlite3"
 
-# --- SERVICES ---
+# ====== SERVICES ======
 LAMI = "Ламінування"
 EXT = "Нарощування"
 EXT_TYPES = ["Класика", "2D", "3D"]
@@ -50,3 +41,14 @@ def norm_date(s: str) -> Optional[str]:
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", s):
         return s
     return None
+
+
+# ====== START BOT ======
+async def main():
+    print("=== START POLLING ===", flush=True)
+    await dp.start_polling(bot)
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+
