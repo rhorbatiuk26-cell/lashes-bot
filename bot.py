@@ -41,7 +41,7 @@ def admin_chat_targets() -> list[int]:
     ids: list[int] = []
     for x in raw.split(","):
         x = x.strip()
-        if x.isdigit():
+        if re.fullmatch(r"-?\d+", x):
             ids.append(int(x))
     return ids
 
@@ -57,6 +57,9 @@ DEFAULT_WEEKS = 4
 SERV_LAMI = "Ламінування"
 SERV_EXT = "Нарощування"
 EXT_TYPES = ["Класика", "2D", "3D"]
+
+# Autocleanup: delete slots older than first day of current month
+CLEANUP_EVERY_HOURS = 6
 
 
 # ================== HELPERS ==================
@@ -117,6 +120,15 @@ def shift_month(y: int, m: int, delta: int) -> tuple[int, int]:
     return yy, mm
 
 
+def month_cmp(a_y: int, a_m: int, b_y: int, b_m: int) -> int:
+    """-1 if a<b, 0 if equal, 1 if a>b"""
+    if (a_y, a_m) < (b_y, b_m):
+        return -1
+    if (a_y, a_m) > (b_y, b_m):
+        return 1
+    return 0
+
+
 def parse_dt_from_callback(call_data: str) -> tuple[str, str]:
     """
     callback_data examples:
@@ -167,6 +179,15 @@ def times_for_date(d: date) -> list[str]:
     return DEFAULT_TIMES
 
 
+def first_day_current_month() -> date:
+    today = datetime.now(TZ).date()
+    return date(today.year, today.month, 1)
+
+
+def iso_today() -> str:
+    return datetime.now(TZ).date().isoformat()
+
+
 # ================== Reply Keyboard ==================
 def rk_main(is_admin: bool) -> ReplyKeyboardMarkup:
     keyboard = [
@@ -179,13 +200,6 @@ def rk_main(is_admin: bool) -> ReplyKeyboardMarkup:
 
 
 # ================== DB ==================
-async def _column_exists(db: aiosqlite.Connection, table: str, col: str) -> bool:
-    cur = await db.execute(f"PRAGMA table_info({table})")
-    rows = await cur.fetchall()
-    cols = {r[1] for r in rows}
-    return col in cols
-
-
 async def ensure_schema():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -216,8 +230,17 @@ async def ensure_schema():
         await db.commit()
 
 
+async def cleanup_past_month_slots():
+    """Delete ALL slots older than first day of current month (e.g. on Feb 1 deletes January slots)."""
+    cutoff = first_day_current_month().isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        # delete only slots, bookings history we keep
+        await db.execute("DELETE FROM slots WHERE d < ?", (cutoff,))
+        await db.commit()
+
+
 async def bulk_add_default_slots(weeks: int = DEFAULT_WEEKS) -> tuple[int, int]:
-    today = date.today()
+    today = datetime.now(TZ).date()
     end = today + timedelta(days=weeks * 7)
     added, skipped = 0, 0
 
@@ -408,13 +431,22 @@ async def notify_client(user_id: int | None, text: str):
     try:
         await bot.send_message(user_id, text)
     except Exception:
+        # user may not have started bot
         pass
 
 
 # ================== UI ==================
 def kb_calendar(month: str, prefix: str) -> InlineKeyboardMarkup:
+    """
+    Calendar that:
+      - disables clicks for past dates
+      - prevents navigation to past months
+    """
     y, m = parse_month_key(month)
     cal = calendar.monthcalendar(y, m)
+
+    today = datetime.now(TZ).date()
+    min_y, min_m = today.year, today.month
 
     b = InlineKeyboardBuilder()
     b.row(InlineKeyboardButton(text=f"📅 {calendar.month_name[m]} {y}", callback_data="noop"))
@@ -428,16 +460,28 @@ def kb_calendar(month: str, prefix: str) -> InlineKeyboardMarkup:
             if day == 0:
                 row_btns.append(InlineKeyboardButton(text=" ", callback_data="noop"))
             else:
-                d_str = f"{y:04d}-{m:02d}-{day:02d}"
-                row_btns.append(InlineKeyboardButton(text=str(day), callback_data=f"{prefix}:day:{d_str}"))
+                d_obj = date(y, m, day)
+                d_str = d_obj.isoformat()
+
+                # disable past dates
+                if d_obj < today:
+                    row_btns.append(InlineKeyboardButton(text=str(day), callback_data="noop"))
+                else:
+                    row_btns.append(InlineKeyboardButton(text=str(day), callback_data=f"{prefix}:day:{d_str}"))
         b.row(*row_btns)
 
     prev_y, prev_m = shift_month(y, m, -1)
     next_y, next_m = shift_month(y, m, +1)
-    b.row(
-        InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}:month:{month_key(prev_y, prev_m)}"),
-        InlineKeyboardButton(text="➡️", callback_data=f"{prefix}:month:{month_key(next_y, next_m)}"),
-    )
+
+    # prevent going to past months
+    if month_cmp(prev_y, prev_m, min_y, min_m) < 0:
+        prev_btn = InlineKeyboardButton(text="⬅️", callback_data="noop")
+    else:
+        prev_btn = InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}:month:{month_key(prev_y, prev_m)}")
+
+    next_btn = InlineKeyboardButton(text="➡️", callback_data=f"{prefix}:month:{month_key(next_y, next_m)}")
+
+    b.row(prev_btn, next_btn)
     return b.as_markup()
 
 
@@ -675,7 +719,7 @@ async def u_service(call: CallbackQuery, state: FSMContext):
     if serv == "lami":
         await state.update_data(service=SERV_LAMI, ext_type=None)
         await state.set_state(UserBooking.day)
-        today = date.today()
+        today = datetime.now(TZ).date()
         await call.message.answer("Оберіть дату (календар):", reply_markup=kb_calendar(month_key(today.year, today.month), "u"))
     else:
         await state.update_data(service=SERV_EXT)
@@ -689,7 +733,7 @@ async def u_ext(call: CallbackQuery, state: FSMContext):
     ext = call.data.split(":", 2)[-1]
     await state.update_data(ext_type=ext)
     await state.set_state(UserBooking.day)
-    today = date.today()
+    today = datetime.now(TZ).date()
     await call.message.answer("Оберіть дату (календар):", reply_markup=kb_calendar(month_key(today.year, today.month), "u"))
     await call.answer()
 
@@ -704,13 +748,21 @@ async def u_month(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("u:day:"))
 async def u_day(call: CallbackQuery, state: FSMContext):
     d = call.data.split(":")[-1]
-    await state.update_data(day=d)
+    today = datetime.now(TZ).date()
+    try:
+        d_obj = datetime.strptime(d, "%Y-%m-%d").date()
+        if d_obj < today:
+            await call.answer("Минулі дати недоступні.", show_alert=True)
+            return
+    except Exception:
+        pass
 
+    await state.update_data(day=d)
     times = await get_open_times(d)
     if not times:
         await call.message.answer("На цю дату немає вільних віконець. Оберіть іншу дату.")
-        today = date.today()
-        await call.message.answer("Календар:", reply_markup=kb_calendar(month_key(today.year, today.month), "u"))
+        now = datetime.now(TZ).date()
+        await call.message.answer("Календар:", reply_markup=kb_calendar(month_key(now.year, now.month), "u"))
         await call.answer()
         return
 
@@ -721,8 +773,8 @@ async def u_day(call: CallbackQuery, state: FSMContext):
 
 @dp.callback_query(F.data == "u:backcal")
 async def u_backcal(call: CallbackQuery):
-    today = date.today()
-    await call.message.answer("Оберіть дату:", reply_markup=kb_calendar(month_key(today.year, today.month), "u"))
+    now = datetime.now(TZ).date()
+    await call.message.answer("Оберіть дату:", reply_markup=kb_calendar(month_key(now.year, now.month), "u"))
     await call.answer()
 
 
@@ -822,8 +874,8 @@ async def u_confirm(call: CallbackQuery, state: FSMContext):
     if not ok:
         await call.message.answer("❌ На жаль цей час вже зайняли. Оберіть інший.")
         await state.set_state(UserBooking.day)
-        today = date.today()
-        await call.message.answer("Календар:", reply_markup=kb_calendar(month_key(today.year, today.month), "u"))
+        now = datetime.now(TZ).date()
+        await call.message.answer("Календар:", reply_markup=kb_calendar(month_key(now.year, now.month), "u"))
         await call.answer()
         return
 
@@ -848,7 +900,7 @@ async def u_confirm(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# ================== USER: cancel booking (works!) ==================
+# ================== USER: cancel booking ==================
 @dp.callback_query(F.data.startswith("u:cancel_ask:"))
 async def u_cancel_ask(call: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -915,7 +967,7 @@ async def u_cancel_do(call: CallbackQuery):
     await call.answer()
 
 
-# ================== USER: move booking (simple) ==================
+# ================== USER: move booking ==================
 @dp.callback_query(F.data.startswith("u:move_start:"))
 async def u_move_start(call: CallbackQuery):
     try:
@@ -929,9 +981,9 @@ async def u_move_start(call: CallbackQuery):
         await call.answer("Запис не знайдено або вже неактивний.", show_alert=True)
         return
 
-    today = date.today()
-    mk = month_key(today.year, today.month)
-    await call.message.answer(f"Оберіть НОВУ дату для переносу:", reply_markup=kb_calendar(mk, f"u_move:{bid}"))
+    now = datetime.now(TZ).date()
+    mk = month_key(now.year, now.month)
+    await call.message.answer("Оберіть НОВУ дату для переносу:", reply_markup=kb_calendar(mk, f"u_move:{bid}"))
     await call.answer()
 
 
@@ -1013,6 +1065,10 @@ async def a_menu(call: CallbackQuery, state: FSMContext):
 async def a_bulk(call: CallbackQuery):
     if not is_admin_username(call):
         return await call.answer("Нема доступу", show_alert=True)
+
+    # before adding slots, cleanup old month
+    await cleanup_past_month_slots()
+
     added, skipped = await bulk_add_default_slots(DEFAULT_WEEKS)
     await call.message.answer(
         "✅ Готово!\n"
@@ -1041,6 +1097,16 @@ async def a_addslot_d(message: Message, state: FSMContext):
     d = norm_date_admin(message.text)
     if not d:
         return await message.answer("❌ Невірний формат. Введіть ДД.ММ.РРРР (наприклад 03.02.2026).")
+
+    # block past dates
+    today = datetime.now(TZ).date()
+    try:
+        d_obj = datetime.strptime(d, "%Y-%m-%d").date()
+        if d_obj < today:
+            return await message.answer("Минулі дати не можна додавати. Введіть майбутню дату.")
+    except Exception:
+        pass
+
     await state.update_data(d=d)
     await state.set_state(AdminAddSlot.t)
     await message.answer("Введіть час HH:MM (наприклад 15:30):")
@@ -1064,8 +1130,8 @@ async def a_addslot_t(message: Message, state: FSMContext):
 async def a_del_slot_day(call: CallbackQuery):
     if not is_admin_username(call):
         return await call.answer("Нема доступу", show_alert=True)
-    today = date.today()
-    await call.message.answer("Оберіть дату для видалення часу:", reply_markup=kb_calendar(month_key(today.year, today.month), "a_del"))
+    now = datetime.now(TZ).date()
+    await call.message.answer("Оберіть дату для видалення часу:", reply_markup=kb_calendar(month_key(now.year, now.month), "a_del"))
     await call.answer()
 
 
@@ -1126,8 +1192,8 @@ async def a_del_slot(call: CallbackQuery):
 async def a_day(call: CallbackQuery):
     if not is_admin_username(call):
         return await call.answer("Нема доступу", show_alert=True)
-    today = date.today()
-    await call.message.answer("Оберіть дату (календар):", reply_markup=kb_calendar(month_key(today.year, today.month), "a_day"))
+    now = datetime.now(TZ).date()
+    await call.message.answer("Оберіть дату (календар):", reply_markup=kb_calendar(month_key(now.year, now.month), "a_day"))
     await call.answer()
 
 
@@ -1181,8 +1247,8 @@ async def a_cancel(call: CallbackQuery):
 
     extra = f" ({bk['ext_type']})" if bk.get("ext_type") else ""
 
-    # message to admin (the one who clicked) + other admins
     await call.message.answer(f"✅ Запис #{bid} скасовано. Слот {fmt_date_iso_to_ua(d)} {t} відкрито.")
+
     admin_text = (
         "📤 СКАСУВАННЯ ЗАПИСУ (адмін)\n\n"
         f"🆔 booking_id: {bid}\n"
@@ -1195,7 +1261,6 @@ async def a_cancel(call: CallbackQuery):
     )
     await notify_admins(admin_text)
 
-    # notify client ✅
     client_text = (
         "❌ Ваш запис скасовано адміністратором.\n\n"
         f"📅 Дата: {fmt_date_iso_to_ua(d)}\n"
@@ -1221,8 +1286,8 @@ async def a_move_start(call: CallbackQuery):
         await call.answer()
         return
 
-    today = date.today()
-    mk = month_key(today.year, today.month)
+    now = datetime.now(TZ).date()
+    mk = month_key(now.year, now.month)
     await call.message.answer(f"Оберіть НОВУ дату для переносу запису #{bid}:", reply_markup=kb_calendar(mk, f"a_move:{bid}"))
     await call.answer()
 
@@ -1291,7 +1356,6 @@ async def a_move_time(call: CallbackQuery):
     )
     await notify_admins(admin_text)
 
-    # notify client ✅
     client_text = (
         "🔁 Ваш запис перенесено адміністратором.\n\n"
         f"Було: {fmt_dt(old_d, old_t)}\n"
@@ -1310,10 +1374,27 @@ async def noop(call: CallbackQuery):
     await call.answer()
 
 
+# ================== BACKGROUND CLEANUP TASK ==================
+async def cleanup_loop():
+    while True:
+        try:
+            await cleanup_past_month_slots()
+        except Exception:
+            pass
+        await asyncio.sleep(CLEANUP_EVERY_HOURS * 3600)
+
+
 # ================== MAIN ==================
 async def main():
     await ensure_schema()
-    print("VERSION: saturday times + admin delete slot + user cancel/move + admin cancel/move notify client", flush=True)
+
+    # one-time cleanup on start
+    await cleanup_past_month_slots()
+
+    # background cleanup
+    asyncio.create_task(cleanup_loop())
+
+    print("VERSION: autocleanup past month + calendar blocks past dates", flush=True)
     print("=== BOT STARTED (polling) ===", flush=True)
     await dp.start_polling(bot)
 
