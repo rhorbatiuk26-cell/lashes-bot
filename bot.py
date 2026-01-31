@@ -22,12 +22,12 @@ DB_PATH = "lashes_bot.sqlite3"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set. Add BOT_TOKEN in env variables.")
+    raise RuntimeError("BOT_TOKEN is not set. Add BOT_TOKEN in Railway Variables.")
 
 # admins by username (WITHOUT @)
 ADMIN_USERNAMES = {"roman2696", "Ekaterinahorbatiuk"}
 
-# schedule: Tue-Sat (Mon=0..Sun=6)
+# bulk schedule: Tue-Sat (Mon=0..Sun=6)
 DEFAULT_TIMES = ["09:30", "11:30", "13:30"]
 WORKING_DAYS = {1, 2, 3, 4, 5}  # Tue-Sat
 DEFAULT_WEEKS = 4
@@ -46,14 +46,13 @@ def is_admin_username(msg_or_cq) -> bool:
 
 def admin_chat_targets() -> list[int]:
     """
-    Куди слати сповіщення адмінам.
-    Найнадійніше: додати ADMIN_CHAT_IDS у змінні середовища,
-    наприклад: "12345,67890"
+    Надійний спосіб для сповіщень:
+    Railway Variables -> ADMIN_CHAT_IDS="123,456"
     """
     raw = (os.getenv("ADMIN_CHAT_IDS") or "").strip()
     if not raw:
         return []
-    ids = []
+    ids: list[int] = []
     for x in raw.split(","):
         x = x.strip()
         if x.isdigit():
@@ -96,15 +95,37 @@ def shift_month(y: int, m: int, delta: int) -> tuple[int, int]:
     return yy, mm
 
 
-def parse_dt_from_callback(call_data: str) -> tuple[str, str]:
-    parts = (call_data or "").split(":")
-    if len(parts) < 2:
-        return "", ""
-    return parts[-2], parts[-1]
-
-
 def digits_count(s: str) -> int:
     return len(re.sub(r"\D", "", s or ""))
+
+
+def parse_dt_from_callback(call_data: str) -> tuple[str, str]:
+    """
+    ✅ FIX: callback_data містить час як HH:MM, який розбивається на 2 частини.
+    Працює для:
+      u:time:YYYY-MM-DD:HH:MM
+      a_move:123:time:YYYY-MM-DD:HH:MM
+    Повертає (YYYY-MM-DD, HH:MM)
+    """
+    parts = (call_data or "").split(":")
+    if len(parts) < 3:
+        return "", ""
+
+    # шукаємо дату з кінця
+    for i in range(len(parts) - 1, -1, -1):
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[i]):
+            # формат після дати: HH : MM
+            if i + 2 < len(parts):
+                hh = parts[i + 1]
+                mm = parts[i + 2]
+                if re.fullmatch(r"[0-2]\d", hh) and re.fullmatch(r"[0-5]\d", mm):
+                    return parts[i], f"{hh}:{mm}"
+
+            # запасний варіант якщо час одним шматком "HH:MM"
+            if i + 1 < len(parts) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", parts[i + 1]):
+                return parts[i], parts[i + 1]
+
+    return "", ""
 
 
 # ================== DB ==================
@@ -312,6 +333,7 @@ def kb_calendar(month: str, prefix: str) -> InlineKeyboardMarkup:
 def kb_times(d: str, times: list[str], prefix: str) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for t in times:
+        # callback_data: prefix:time:YYYY-MM-DD:HH:MM  (так треба!)
         b.row(InlineKeyboardButton(text=t, callback_data=f"{prefix}:time:{d}:{t}"))
     b.row(InlineKeyboardButton(text="⬅️ Назад до календаря", callback_data=f"{prefix}:backcal"))
     return b.as_markup()
@@ -382,28 +404,13 @@ dp = Dispatcher(storage=MemoryStorage())
 
 
 # ================== NOTIFY ADMINS ==================
-async def notify_admins_booking(data: dict):
-    """
-    Надсилає сповіщення:
-      1) Якщо задано ADMIN_CHAT_IDS -> всім цим chat_id
-      2) Інакше -> всім адмінам з ADMIN_USERNAMES (якщо вони вже писали боту, їх chat_id є в апдейті? ні)
-    Реально надійно працює саме через ADMIN_CHAT_IDS.
-    """
-    text = data["text"]
-
+async def notify_admins(text: str):
     targets = admin_chat_targets()
-    sent_any = False
-
     for chat_id in targets:
         try:
             await bot.send_message(chat_id, text)
-            sent_any = True
         except Exception:
             pass
-
-    # Якщо ADMIN_CHAT_IDS не задані, попередимо адміна в логах/користувача ми не будемо.
-    # Тому просто нічого не робимо.
-    return sent_any
 
 
 # ================== START ==================
@@ -426,11 +433,10 @@ async def cmd_admin(message: Message, state: FSMContext):
 
 @dp.message(Command("myid"))
 async def cmd_myid(message: Message):
-    # щоб адмін легко дізнався свій chat_id для ADMIN_CHAT_IDS
     await message.answer(f"Ваш chat_id: {message.chat.id}")
 
 
-# ================== USER FLOW ==================
+# ================== USER ==================
 @dp.callback_query(F.data == "u:start")
 async def u_start(call: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -518,7 +524,7 @@ async def u_backcal(call: CallbackQuery):
 async def u_time(call: CallbackQuery, state: FSMContext):
     d, t = parse_dt_from_callback(call.data)
     if not d or not t:
-        await call.answer("Помилка даних. Спробуйте ще раз.", show_alert=True)
+        await call.answer("Помилка часу/дати. Оберіть знову.", show_alert=True)
         return
 
     await state.update_data(day=d, time=t)
@@ -547,9 +553,21 @@ async def u_phone(message: Message, state: FSMContext):
     await state.update_data(phone=phone)
 
     data = await state.get_data()
-    d = data["day"]
-    t = data["time"]
-    service = data["service"]
+    service = data.get("service")
+    d = data.get("day")
+    t = data.get("time")
+    client_name = data.get("client_name")
+
+    # якщо стан злетів - не падаємо
+    if not service or not d or not t or not client_name:
+        await state.clear()
+        await message.answer(
+            "⚠️ Схоже бот перезапустився/оновився, тому запис треба зробити заново.\n"
+            "Натисніть «Записатись» 👇",
+            reply_markup=kb_start()
+        )
+        return
+
     ext_type = data.get("ext_type")
 
     text = (
@@ -557,7 +575,7 @@ async def u_phone(message: Message, state: FSMContext):
         f"📅 Дата: {d}\n"
         f"🕒 Час: {t}\n"
         f"💅 Послуга: {service}{f' ({ext_type})' if ext_type else ''}\n"
-        f"👤 Клієнт: {data['client_name']}\n"
+        f"👤 Клієнт: {client_name}\n"
         f"📞 Телефон: {phone}\n\n"
         "Підтверджуєте?"
     )
@@ -577,13 +595,18 @@ async def u_confirm(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return
 
-    # yes
-    d = data["day"]
-    t = data["time"]
-    service = data["service"]
+    service = data.get("service")
+    d = data.get("day")
+    t = data.get("time")
+    fullname = data.get("client_name")
+    phone = data.get("phone")
     ext_type = data.get("ext_type")
-    fullname = data["client_name"]
-    phone = data["phone"]
+
+    if not service or not d or not t or not fullname or not phone:
+        await state.clear()
+        await call.message.answer("⚠️ Дані запису загубились. Почніть запис заново.", reply_markup=kb_start())
+        await call.answer()
+        return
 
     ok = await book_slot(
         user_id=call.from_user.id,
@@ -623,7 +646,7 @@ async def u_confirm(call: CallbackQuery, state: FSMContext):
         f"📞 {phone}\n"
         f"🔗 Telegram: {uname_part} | id: {call.from_user.id}"
     )
-    await notify_admins_booking({"text": admin_text})
+    await notify_admins(admin_text)
 
     await call.answer()
 
@@ -874,7 +897,7 @@ async def noop(call: CallbackQuery):
 # ================== MAIN ==================
 async def main():
     await ensure_schema()
-    print("VERSION: 2026-01-31 CONFIRM + ADMIN NOTIFY", flush=True)
+    print("VERSION: 2026-01-31 FIX TIME PARSE + CONFIRM + ADMIN NOTIFY", flush=True)
     print("=== BOT STARTED (polling) ===", flush=True)
     await dp.start_polling(bot)
 
