@@ -20,7 +20,11 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 
 # ================== CONFIG ==================
-DB_PATH = "lashes_bot.sqlite3"
+# ✅ IMPORTANT: use Railway Volume so DB persists across deploys
+# Add Railway Volume mounted to /data
+DATA_DIR = os.getenv("DATA_DIR", "/data")
+os.makedirs(DATA_DIR, exist_ok=True)  # ✅ ensure folder exists
+DB_PATH = os.path.join(DATA_DIR, "lashes_bot.sqlite3")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 if not BOT_TOKEN:
@@ -121,7 +125,6 @@ def shift_month(y: int, m: int, delta: int) -> tuple[int, int]:
 
 
 def month_cmp(a_y: int, a_m: int, b_y: int, b_m: int) -> int:
-    """-1 if a<b, 0 if equal, 1 if a>b"""
     if (a_y, a_m) < (b_y, b_m):
         return -1
     if (a_y, a_m) > (b_y, b_m):
@@ -130,13 +133,6 @@ def month_cmp(a_y: int, a_m: int, b_y: int, b_m: int) -> int:
 
 
 def parse_dt_from_callback(call_data: str) -> tuple[str, str]:
-    """
-    callback_data examples:
-      u:time:YYYY-MM-DD:HH:MM
-      a_move:123:time:YYYY-MM-DD:HH:MM
-      u_move:123:time:YYYY-MM-DD:HH:MM
-    returns ("YYYY-MM-DD", "HH:MM")
-    """
     parts = (call_data or "").split(":")
     if len(parts) < 3:
         return "", ""
@@ -173,7 +169,6 @@ def tg_user_label(user_id: int, username: str | None) -> str:
 
 
 def times_for_date(d: date) -> list[str]:
-    # Saturday = 5
     if d.weekday() == 5:
         return SATURDAY_TIMES
     return DEFAULT_TIMES
@@ -182,10 +177,6 @@ def times_for_date(d: date) -> list[str]:
 def first_day_current_month() -> date:
     today = datetime.now(TZ).date()
     return date(today.year, today.month, 1)
-
-
-def iso_today() -> str:
-    return datetime.now(TZ).date().isoformat()
 
 
 # ================== Reply Keyboard ==================
@@ -231,10 +222,8 @@ async def ensure_schema():
 
 
 async def cleanup_past_month_slots():
-    """Delete ALL slots older than first day of current month (e.g. on Feb 1 deletes January slots)."""
     cutoff = first_day_current_month().isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
-        # delete only slots, bookings history we keep
         await db.execute("DELETE FROM slots WHERE d < ?", (cutoff,))
         await db.commit()
 
@@ -280,24 +269,16 @@ async def get_open_times(d: str) -> list[str]:
 
 async def get_slots_day(d: str) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
-        cur = await db.execute("""
-            SELECT id, t, is_open
-            FROM slots
-            WHERE d=?
-            ORDER BY t
-        """, (d,))
+        cur = await db.execute("SELECT id, t, is_open FROM slots WHERE d=? ORDER BY t", (d,))
         rows = await cur.fetchall()
     return [{"id": r[0], "t": r[1], "is_open": r[2]} for r in rows]
 
 
 async def delete_slot(slot_id: int) -> bool:
-    """Delete slot only if it is open (not booked)."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT is_open FROM slots WHERE id=?", (slot_id,))
         row = await cur.fetchone()
-        if not row:
-            return False
-        if row[0] != 1:
+        if not row or row[0] != 1:
             return False
         await db.execute("DELETE FROM slots WHERE id=?", (slot_id,))
         await db.commit()
@@ -331,10 +312,7 @@ async def get_user_active_bookings(user_id: int) -> list[dict]:
         """, (user_id,))
         rows = await cur.fetchall()
 
-    return [
-        {"id": r[0], "d": r[1], "t": r[2], "service": r[3], "ext_type": r[4], "client_name": r[5], "phone": r[6]}
-        for r in rows
-    ]
+    return [{"id": r[0], "d": r[1], "t": r[2], "service": r[3], "ext_type": r[4], "client_name": r[5], "phone": r[6]} for r in rows]
 
 
 async def get_booking_by_id(booking_id: int) -> dict | None:
@@ -347,10 +325,8 @@ async def get_booking_by_id(booking_id: int) -> dict | None:
         r = await cur.fetchone()
     if not r:
         return None
-    return {
-        "id": r[0], "user_id": r[1], "username": r[2], "client_name": r[3], "phone": r[4],
-        "service": r[5], "ext_type": r[6], "d": r[7], "t": r[8], "status": r[9]
-    }
+    return {"id": r[0], "user_id": r[1], "username": r[2], "client_name": r[3], "phone": r[4],
+            "service": r[5], "ext_type": r[6], "d": r[7], "t": r[8], "status": r[9]}
 
 
 async def get_day_bookings(d: str) -> list[dict]:
@@ -363,17 +339,11 @@ async def get_day_bookings(d: str) -> list[dict]:
         """, (d,))
         rows = await cur.fetchall()
 
-    return [
-        {
-            "id": r[0], "user_id": r[1], "username": r[2], "client_name": r[3],
-            "phone": r[4], "service": r[5], "ext_type": r[6], "t": r[7], "status": r[8]
-        }
-        for r in rows
-    ]
+    return [{"id": r[0], "user_id": r[1], "username": r[2], "client_name": r[3],
+             "phone": r[4], "service": r[5], "ext_type": r[6], "t": r[7], "status": r[8]} for r in rows]
 
 
 async def cancel_booking(booking_id: int) -> tuple[bool, str, str]:
-    """Cancel booking and reopen slot."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT d,t,status FROM bookings WHERE id=?", (booking_id,))
         row = await cur.fetchone()
@@ -382,7 +352,6 @@ async def cancel_booking(booking_id: int) -> tuple[bool, str, str]:
         d, t, status = row
         if status == "canceled":
             return True, d, t
-
         await db.execute("UPDATE bookings SET status='canceled' WHERE id=?", (booking_id,))
         await db.execute("UPDATE slots SET is_open=1 WHERE d=? AND t=?", (d, t))
         await db.commit()
@@ -390,7 +359,6 @@ async def cancel_booking(booking_id: int) -> tuple[bool, str, str]:
 
 
 async def move_booking(booking_id: int, new_d: str, new_t: str) -> bool:
-    """Move booking to another open slot."""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT d,t,status FROM bookings WHERE id=?", (booking_id,))
         row = await cur.fetchone()
@@ -431,17 +399,11 @@ async def notify_client(user_id: int | None, text: str):
     try:
         await bot.send_message(user_id, text)
     except Exception:
-        # user may not have started bot
         pass
 
 
 # ================== UI ==================
 def kb_calendar(month: str, prefix: str) -> InlineKeyboardMarkup:
-    """
-    Calendar that:
-      - disables clicks for past dates
-      - prevents navigation to past months
-    """
     y, m = parse_month_key(month)
     cal = calendar.monthcalendar(y, m)
 
@@ -462,8 +424,6 @@ def kb_calendar(month: str, prefix: str) -> InlineKeyboardMarkup:
             else:
                 d_obj = date(y, m, day)
                 d_str = d_obj.isoformat()
-
-                # disable past dates
                 if d_obj < today:
                     row_btns.append(InlineKeyboardButton(text=str(day), callback_data="noop"))
                 else:
@@ -473,14 +433,12 @@ def kb_calendar(month: str, prefix: str) -> InlineKeyboardMarkup:
     prev_y, prev_m = shift_month(y, m, -1)
     next_y, next_m = shift_month(y, m, +1)
 
-    # prevent going to past months
     if month_cmp(prev_y, prev_m, min_y, min_m) < 0:
         prev_btn = InlineKeyboardButton(text="⬅️", callback_data="noop")
     else:
         prev_btn = InlineKeyboardButton(text="⬅️", callback_data=f"{prefix}:month:{month_key(prev_y, prev_m)}")
 
     next_btn = InlineKeyboardButton(text="➡️", callback_data=f"{prefix}:month:{month_key(next_y, next_m)}")
-
     b.row(prev_btn, next_btn)
     return b.as_markup()
 
@@ -577,7 +535,6 @@ def kb_admin_day_actions(d: str, bookings: list[dict]) -> InlineKeyboardMarkup:
             b.row(InlineKeyboardButton(text=f"🔁 Перенести #{bk['id']} ({bk['t']})", callback_data=f"a:move:{bk['id']}"))
     else:
         b.row(InlineKeyboardButton(text="(Нема записів)", callback_data="noop"))
-
     b.row(InlineKeyboardButton(text="⬅️ Назад до календаря", callback_data="a:day"))
     b.row(InlineKeyboardButton(text="🏠 Адмін-меню", callback_data="a:menu"))
     return b.as_markup()
@@ -676,7 +633,7 @@ async def cmd_admin(message: Message, state: FSMContext):
     await message.answer("🛠 Адмін-панель:", reply_markup=kb_admin())
 
 
-# ================== USER: menu callbacks ==================
+# ================== USER: callbacks ==================
 @dp.callback_query(F.data == "u:my")
 async def u_my(call: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -712,7 +669,6 @@ async def u_back(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# ================== USER: booking flow ==================
 @dp.callback_query(F.data.startswith("u:serv:"))
 async def u_service(call: CallbackQuery, state: FSMContext):
     serv = call.data.split(":")[-1]
@@ -748,15 +704,6 @@ async def u_month(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("u:day:"))
 async def u_day(call: CallbackQuery, state: FSMContext):
     d = call.data.split(":")[-1]
-    today = datetime.now(TZ).date()
-    try:
-        d_obj = datetime.strptime(d, "%Y-%m-%d").date()
-        if d_obj < today:
-            await call.answer("Минулі дати недоступні.", show_alert=True)
-            return
-    except Exception:
-        pass
-
     await state.update_data(day=d)
     times = await get_open_times(d)
     if not times:
@@ -781,10 +728,6 @@ async def u_backcal(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("u:time:"))
 async def u_time(call: CallbackQuery, state: FSMContext):
     d, t = parse_dt_from_callback(call.data)
-    if not d or not t:
-        await call.answer("Помилка часу/дати. Оберіть знову.", show_alert=True)
-        return
-
     await state.update_data(day=d, time=t)
     await state.set_state(UserBooking.fullname)
     await call.message.answer("Вкажіть Прізвище та Ім’я (наприклад: Іваненко Марія):")
@@ -794,9 +737,8 @@ async def u_time(call: CallbackQuery, state: FSMContext):
 @dp.message(UserBooking.fullname)
 async def u_fullname(message: Message, state: FSMContext):
     fullname = (message.text or "").strip()
-    if len(fullname.split()) < 2 or len(fullname) < 5:
-        return await message.answer("Напишіть, будь ласка, Прізвище та Ім’я (2 слова).")
-
+    if len(fullname.split()) < 2:
+        return await message.answer("Напишіть Прізвище та Ім’я (2 слова).")
     await state.update_data(client_name=fullname)
     await state.set_state(UserBooking.phone)
     await message.answer("Тепер номер телефону (наприклад +380XXXXXXXXX):")
@@ -809,26 +751,15 @@ async def u_phone(message: Message, state: FSMContext):
         return await message.answer("Номер виглядає некоректно. Введіть ще раз.")
 
     await state.update_data(phone=phone)
-
     data = await state.get_data()
-    service = data.get("service")
-    d = data.get("day")
-    t = data.get("time")
-    client_name = data.get("client_name")
-    ext_type = data.get("ext_type")
-
-    if not service or not d or not t or not client_name:
-        await state.clear()
-        await message.answer("⚠️ Дані запису загубились. Натисніть «Записатись» і зробіть запис знову 👇", reply_markup=kb_start())
-        return
 
     text = (
         "Перевірте запис 👇\n\n"
-        f"📅 Дата: {fmt_date_iso_to_ua(d)}\n"
-        f"🕒 Час: {t}\n"
-        f"💅 Послуга: {service}{f' ({ext_type})' if ext_type else ''}\n"
-        f"👤 Клієнт: {client_name}\n"
-        f"📞 Телефон: {phone}\n\n"
+        f"📅 Дата: {fmt_date_iso_to_ua(data.get('day',''))}\n"
+        f"🕒 Час: {data.get('time','')}\n"
+        f"💅 Послуга: {data.get('service','')}{f' ({data.get('ext_type')})' if data.get('ext_type') else ''}\n"
+        f"👤 Клієнт: {data.get('client_name','')}\n"
+        f"📞 Телефон: {data.get('phone','')}\n\n"
         "Підтверджуєте?"
     )
 
@@ -847,28 +778,15 @@ async def u_confirm(call: CallbackQuery, state: FSMContext):
         await call.answer()
         return
 
-    service = data.get("service")
-    d = data.get("day")
-    t = data.get("time")
-    fullname = data.get("client_name")
-    phone = data.get("phone")
-    ext_type = data.get("ext_type")
-
-    if not service or not d or not t or not fullname or not phone:
-        await state.clear()
-        await call.message.answer("⚠️ Дані запису загубились. Почніть запис заново.", reply_markup=kb_start())
-        await call.answer()
-        return
-
     ok = await book_slot(
         user_id=call.from_user.id,
         username=(call.from_user.username or ""),
-        client_name=fullname,
-        phone=phone,
-        service=service,
-        ext_type=ext_type,
-        d=d,
-        t=t
+        client_name=data["client_name"],
+        phone=data["phone"],
+        service=data["service"],
+        ext_type=data.get("ext_type"),
+        d=data["day"],
+        t=data["time"]
     )
 
     if not ok:
@@ -881,59 +799,46 @@ async def u_confirm(call: CallbackQuery, state: FSMContext):
 
     await call.message.answer(
         "✅ Запис підтверджено!\n"
-        f"Дата: {fmt_date_iso_to_ua(d)}\n"
-        f"Час: {t}\n"
-        f"Послуга: {service}{f' ({ext_type})' if ext_type else ''}"
+        f"Дата: {fmt_date_iso_to_ua(data['day'])}\n"
+        f"Час: {data['time']}\n"
+        f"Послуга: {data['service']}{f' ({data.get('ext_type')})' if data.get('ext_type') else ''}"
     )
     await state.clear()
 
-    admin_text = (
+    await notify_admins(
         "📥 НОВИЙ ЗАПИС\n\n"
-        f"📅 {fmt_date_iso_to_ua(d)}\n"
-        f"🕒 {t}\n"
-        f"💅 {service}{f' ({ext_type})' if ext_type else ''}\n"
-        f"👤 {fullname}\n"
-        f"📞 {phone}\n"
+        f"📅 {fmt_date_iso_to_ua(data['day'])}\n"
+        f"🕒 {data['time']}\n"
+        f"💅 {data['service']}{f' ({data.get('ext_type')})' if data.get('ext_type') else ''}\n"
+        f"👤 {data['client_name']}\n"
+        f"📞 {data['phone']}\n"
         f"🔗 {tg_user_label(call.from_user.id, call.from_user.username)}"
     )
-    await notify_admins(admin_text)
     await call.answer()
 
 
-# ================== USER: cancel booking ==================
 @dp.callback_query(F.data.startswith("u:cancel_ask:"))
 async def u_cancel_ask(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    try:
-        bid = int(call.data.split(":")[-1])
-    except ValueError:
-        await call.answer("Помилка ID", show_alert=True)
-        return
-
+    bid = int(call.data.split(":")[-1])
     bk = await get_booking_by_id(bid)
     if not bk or bk["user_id"] != call.from_user.id or bk["status"] != "active":
         await call.answer("Запис не знайдено або вже неактивний.", show_alert=True)
         return
-
     extra = f" ({bk['ext_type']})" if bk.get("ext_type") else ""
-    text = (
+    await call.message.answer(
         "Скасувати цей запис?\n\n"
-        f"📅 Дата: {fmt_date_iso_to_ua(bk['d'])}\n"
-        f"🕒 Час: {bk['t']}\n"
-        f"💅 Послуга: {bk['service']}{extra}\n"
+        f"📅 {fmt_date_iso_to_ua(bk['d'])}\n"
+        f"🕒 {bk['t']}\n"
+        f"💅 {bk['service']}{extra}",
+        reply_markup=kb_cancel_confirm(bid)
     )
-    await call.message.answer(text, reply_markup=kb_cancel_confirm(bid))
     await call.answer()
 
 
 @dp.callback_query(F.data.startswith("u:cancel_do:"))
 async def u_cancel_do(call: CallbackQuery):
-    try:
-        bid = int(call.data.split(":")[-1])
-    except ValueError:
-        await call.answer("Помилка ID", show_alert=True)
-        return
-
+    bid = int(call.data.split(":")[-1])
     bk = await get_booking_by_id(bid)
     if not bk or bk["user_id"] != call.from_user.id or bk["status"] != "active":
         await call.answer("Запис не знайдено або вже неактивний.", show_alert=True)
@@ -946,111 +851,21 @@ async def u_cancel_do(call: CallbackQuery):
         return
 
     extra = f" ({bk['ext_type']})" if bk.get("ext_type") else ""
-    await call.message.answer(
-        "✅ Запис скасовано.\n"
-        f"📅 {fmt_date_iso_to_ua(d)}\n"
-        f"🕒 {t}\n"
-        f"💅 {bk['service']}{extra}"
-    )
+    await call.message.answer(f"✅ Запис скасовано: {fmt_dt(d, t)} — {bk['service']}{extra}")
 
-    admin_text = (
-        "📤 СКАСУВАННЯ ЗАПИСУ (клієнт)\n\n"
-        f"📅 {fmt_date_iso_to_ua(d)}\n"
-        f"🕒 {t}\n"
-        f"💅 {bk['service']}{extra}\n"
-        f"👤 {bk['client_name']}\n"
-        f"📞 {bk['phone']}\n"
-        f"🔗 {tg_user_label(bk['user_id'], bk['username'])}\n"
-        f"🆔 booking_id: {bid}"
-    )
-    await notify_admins(admin_text)
-    await call.answer()
-
-
-# ================== USER: move booking ==================
-@dp.callback_query(F.data.startswith("u:move_start:"))
-async def u_move_start(call: CallbackQuery):
-    try:
-        bid = int(call.data.split(":")[-1])
-    except ValueError:
-        await call.answer("Помилка ID", show_alert=True)
-        return
-
-    bk = await get_booking_by_id(bid)
-    if not bk or bk["user_id"] != call.from_user.id or bk["status"] != "active":
-        await call.answer("Запис не знайдено або вже неактивний.", show_alert=True)
-        return
-
-    now = datetime.now(TZ).date()
-    mk = month_key(now.year, now.month)
-    await call.message.answer("Оберіть НОВУ дату для переносу:", reply_markup=kb_calendar(mk, f"u_move:{bid}"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("u_move:") & F.data.contains(":month:"))
-async def u_move_month(call: CallbackQuery):
-    parts = call.data.split(":")
-    bid = parts[1]
-    mk = parts[-1]
-    await call.message.edit_reply_markup(reply_markup=kb_calendar(mk, f"u_move:{bid}"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("u_move:") & F.data.contains(":day:"))
-async def u_move_day(call: CallbackQuery):
-    parts = call.data.split(":")
-    bid = int(parts[1])
-    d = parts[-1]
-    times = await get_open_times(d)
-    if not times:
-        await call.message.answer("На цю дату немає вільних слотів. Оберіть іншу дату.")
-        await call.answer()
-        return
-    await call.message.answer("Оберіть НОВИЙ час:", reply_markup=kb_times(d, times, f"u_move:{bid}"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("u_move:") & F.data.contains(":time:"))
-async def u_move_time(call: CallbackQuery):
-    parts = call.data.split(":")
-    bid = int(parts[1])
-    new_d, new_t = parse_dt_from_callback(call.data)
-
-    bk = await get_booking_by_id(bid)
-    if not bk or bk["user_id"] != call.from_user.id or bk["status"] != "active":
-        await call.answer("Запис не знайдено або вже неактивний.", show_alert=True)
-        return
-
-    old_d, old_t = bk["d"], bk["t"]
-
-    ok = await move_booking(bid, new_d, new_t)
-    if not ok:
-        await call.message.answer("❌ Не вдалося перенести (слот зайнятий або запис неактивний).")
-        await call.answer()
-        return
-
-    extra = f" ({bk['ext_type']})" if bk.get("ext_type") else ""
-    await call.message.answer(
-        "✅ Запис перенесено!\n"
-        f"Було: {fmt_dt(old_d, old_t)}\n"
-        f"Стало: {fmt_dt(new_d, new_t)}\n"
-        f"Послуга: {bk['service']}{extra}"
-    )
-
-    admin_text = (
-        "🔁 ПЕРЕНЕСЕННЯ ЗАПИСУ (клієнт)\n\n"
+    await notify_admins(
+        "📤 СКАСУВАННЯ (клієнт)\n\n"
         f"🆔 booking_id: {bid}\n"
+        f"📅 {fmt_date_iso_to_ua(d)}\n"
+        f"🕒 {t}\n"
         f"👤 {bk['client_name']} | {bk['phone']}\n"
         f"💅 {bk['service']}{extra}\n"
-        f"Було: {fmt_dt(old_d, old_t)}\n"
-        f"Стало: {fmt_dt(new_d, new_t)}\n"
         f"🔗 {tg_user_label(bk['user_id'], bk['username'])}"
     )
-    await notify_admins(admin_text)
     await call.answer()
 
 
-# ================== ADMIN ==================
+# ================== ADMIN callbacks (short) ==================
 @dp.callback_query(F.data == "a:menu")
 async def a_menu(call: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -1065,310 +880,12 @@ async def a_menu(call: CallbackQuery, state: FSMContext):
 async def a_bulk(call: CallbackQuery):
     if not is_admin_username(call):
         return await call.answer("Нема доступу", show_alert=True)
-
-    # before adding slots, cleanup old month
     await cleanup_past_month_slots()
-
     added, skipped = await bulk_add_default_slots(DEFAULT_WEEKS)
-    await call.message.answer(
-        "✅ Готово!\n"
-        f"Додано слотів: {added}\n"
-        f"Вже існували (пропущено): {skipped}\n\n"
-        f"Вт–Пт: {', '.join(DEFAULT_TIMES)}\n"
-        f"Сб: {', '.join(SATURDAY_TIMES)}"
-    )
+    await call.message.answer(f"✅ Готово! Додано: {added}, пропущено: {skipped}")
     await call.answer()
 
 
-@dp.callback_query(F.data == "a:addslot")
-async def a_addslot(call: CallbackQuery, state: FSMContext):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-    await state.clear()
-    await state.set_state(AdminAddSlot.d)
-    await call.message.answer("Введіть дату слоту (ДД.ММ.РРРР), наприклад 03.02.2026:")
-    await call.answer()
-
-
-@dp.message(AdminAddSlot.d)
-async def a_addslot_d(message: Message, state: FSMContext):
-    if not is_admin_username(message):
-        return await message.answer("❌ Доступ лише для адмінів.")
-    d = norm_date_admin(message.text)
-    if not d:
-        return await message.answer("❌ Невірний формат. Введіть ДД.ММ.РРРР (наприклад 03.02.2026).")
-
-    # block past dates
-    today = datetime.now(TZ).date()
-    try:
-        d_obj = datetime.strptime(d, "%Y-%m-%d").date()
-        if d_obj < today:
-            return await message.answer("Минулі дати не можна додавати. Введіть майбутню дату.")
-    except Exception:
-        pass
-
-    await state.update_data(d=d)
-    await state.set_state(AdminAddSlot.t)
-    await message.answer("Введіть час HH:MM (наприклад 15:30):")
-
-
-@dp.message(AdminAddSlot.t)
-async def a_addslot_t(message: Message, state: FSMContext):
-    if not is_admin_username(message):
-        return await message.answer("❌ Доступ лише для адмінів.")
-    t = norm_time(message.text)
-    if not t:
-        return await message.answer("❌ Невірний формат часу. Введіть HH:MM.")
-    data = await state.get_data()
-    inserted = await add_slot(data["d"], t)
-    await message.answer("✅ Слот додано." if inserted else "ℹ️ Такий слот вже існує.")
-    await state.clear()
-
-
-# --- ADMIN: delete slot on chosen day ---
-@dp.callback_query(F.data == "a:del_slot_day")
-async def a_del_slot_day(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-    now = datetime.now(TZ).date()
-    await call.message.answer("Оберіть дату для видалення часу:", reply_markup=kb_calendar(month_key(now.year, now.month), "a_del"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("a_del:month:"))
-async def a_del_month(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-    mk = call.data.split(":")[-1]
-    await call.message.edit_reply_markup(reply_markup=kb_calendar(mk, "a_del"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("a_del:day:"))
-async def a_del_day(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-    d = call.data.split(":")[-1]
-    slots = await get_slots_day(d)
-    await call.message.answer(
-        f"🗑 Слоти на {fmt_date_iso_to_ua(d)}\n\n"
-        "🟢 = вільний (можна видалити)\n"
-        "🔴 = зайнятий (спочатку скасувати запис)\n\n"
-        "Натисніть час, щоб видалити:",
-        reply_markup=kb_admin_delete_slot_list(d, slots)
-    )
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("a:del_slot:"))
-async def a_del_slot(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-
-    parts = call.data.split(":")  # a:del_slot:<slot_id>:<d>
-    if len(parts) < 4:
-        await call.answer("Помилка даних.", show_alert=True)
-        return
-
-    slot_id = int(parts[2])
-    d = parts[3]
-
-    ok = await delete_slot(slot_id)
-    if not ok:
-        await call.message.answer("❌ Не вдалося видалити. Можливо слот зайнятий або вже видалений.")
-        await call.answer()
-        return
-
-    slots = await get_slots_day(d)
-    await call.message.answer(
-        f"✅ Видалено слот.\nОновлений список на {fmt_date_iso_to_ua(d)}:",
-        reply_markup=kb_admin_delete_slot_list(d, slots)
-    )
-    await call.answer()
-
-
-# --- ADMIN: view bookings by day ---
-@dp.callback_query(F.data == "a:day")
-async def a_day(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-    now = datetime.now(TZ).date()
-    await call.message.answer("Оберіть дату (календар):", reply_markup=kb_calendar(month_key(now.year, now.month), "a_day"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("a_day:month:"))
-async def a_day_month(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-    mk = call.data.split(":")[-1]
-    await call.message.edit_reply_markup(reply_markup=kb_calendar(mk, "a_day"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("a_day:day:"))
-async def a_day_show(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-    d = call.data.split(":")[-1]
-    bookings = await get_day_bookings(d)
-
-    lines = [f"📌 Записи на {fmt_date_iso_to_ua(d)}:"]
-    if not bookings:
-        lines.append("— немає")
-    else:
-        for bk in bookings:
-            st = "✅" if bk["status"] == "active" else "🚫"
-            extra = f" ({bk['ext_type']})" if bk["ext_type"] else ""
-            lines.append(f"{st} {bk['t']} — {bk['client_name']} {bk['phone']} — {bk['service']}{extra} (id:{bk['id']})")
-
-    await call.message.answer("\n".join(lines), reply_markup=kb_admin_day_actions(d, bookings))
-    await call.answer()
-
-
-# ✅ ADMIN cancel: notify CLIENT + admins
-@dp.callback_query(F.data.startswith("a:cancel:"))
-async def a_cancel(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-
-    bid = int(call.data.split(":")[-1])
-    bk = await get_booking_by_id(bid)
-    if not bk or bk["status"] != "active":
-        await call.message.answer("❌ Не знайшов активний запис.")
-        await call.answer()
-        return
-
-    ok, d, t = await cancel_booking(bid)
-    if not ok:
-        await call.message.answer("❌ Не вдалося скасувати.")
-        await call.answer()
-        return
-
-    extra = f" ({bk['ext_type']})" if bk.get("ext_type") else ""
-
-    await call.message.answer(f"✅ Запис #{bid} скасовано. Слот {fmt_date_iso_to_ua(d)} {t} відкрито.")
-
-    admin_text = (
-        "📤 СКАСУВАННЯ ЗАПИСУ (адмін)\n\n"
-        f"🆔 booking_id: {bid}\n"
-        f"📅 {fmt_date_iso_to_ua(d)}\n"
-        f"🕒 {t}\n"
-        f"💅 {bk['service']}{extra}\n"
-        f"👤 {bk['client_name']}\n"
-        f"📞 {bk['phone']}\n"
-        f"🔗 {tg_user_label(bk['user_id'], bk['username'])}"
-    )
-    await notify_admins(admin_text)
-
-    client_text = (
-        "❌ Ваш запис скасовано адміністратором.\n\n"
-        f"📅 Дата: {fmt_date_iso_to_ua(d)}\n"
-        f"🕒 Час: {t}\n"
-        f"💅 Послуга: {bk['service']}{extra}\n\n"
-        "Якщо потрібно — можете записатись на інший час у меню."
-    )
-    await notify_client(bk["user_id"], client_text)
-
-    await call.answer()
-
-
-# ✅ ADMIN move: flow + notify CLIENT + admins
-@dp.callback_query(F.data.startswith("a:move:"))
-async def a_move_start(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-
-    bid = int(call.data.split(":")[-1])
-    bk = await get_booking_by_id(bid)
-    if not bk or bk["status"] != "active":
-        await call.message.answer("❌ Не знайшов активний запис.")
-        await call.answer()
-        return
-
-    now = datetime.now(TZ).date()
-    mk = month_key(now.year, now.month)
-    await call.message.answer(f"Оберіть НОВУ дату для переносу запису #{bid}:", reply_markup=kb_calendar(mk, f"a_move:{bid}"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("a_move:") & F.data.contains(":month:"))
-async def a_move_month(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-    parts = call.data.split(":")
-    bid = parts[1]
-    mk = parts[-1]
-    await call.message.edit_reply_markup(reply_markup=kb_calendar(mk, f"a_move:{bid}"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("a_move:") & F.data.contains(":day:"))
-async def a_move_day(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-    parts = call.data.split(":")
-    bid = int(parts[1])
-    d = parts[-1]
-    times = await get_open_times(d)
-    if not times:
-        await call.message.answer("На цю дату немає вільних слотів. Оберіть іншу дату.")
-        await call.answer()
-        return
-    await call.message.answer(f"Оберіть НОВИЙ час для #{bid} на {fmt_date_iso_to_ua(d)}:", reply_markup=kb_times(d, times, f"a_move:{bid}"))
-    await call.answer()
-
-
-@dp.callback_query(F.data.startswith("a_move:") & F.data.contains(":time:"))
-async def a_move_time(call: CallbackQuery):
-    if not is_admin_username(call):
-        return await call.answer("Нема доступу", show_alert=True)
-
-    parts = call.data.split(":")
-    bid = int(parts[1])
-    new_d, new_t = parse_dt_from_callback(call.data)
-
-    bk = await get_booking_by_id(bid)
-    if not bk or bk["status"] != "active":
-        await call.message.answer("❌ Не знайшов активний запис.")
-        await call.answer()
-        return
-
-    old_d, old_t = bk["d"], bk["t"]
-
-    ok = await move_booking(bid, new_d, new_t)
-    if not ok:
-        await call.message.answer("❌ Не вдалося перенести (слот зайнятий/запис неактивний).")
-        await call.answer()
-        return
-
-    extra = f" ({bk['ext_type']})" if bk.get("ext_type") else ""
-    await call.message.answer(f"✅ Перенесено запис #{bid} на {fmt_dt(new_d, new_t)}.")
-
-    admin_text = (
-        "🔁 ПЕРЕНЕСЕННЯ ЗАПИСУ (адмін)\n\n"
-        f"🆔 booking_id: {bid}\n"
-        f"👤 {bk['client_name']} | {bk['phone']}\n"
-        f"💅 {bk['service']}{extra}\n"
-        f"Було: {fmt_dt(old_d, old_t)}\n"
-        f"Стало: {fmt_dt(new_d, new_t)}\n"
-        f"🔗 {tg_user_label(bk['user_id'], bk['username'])}"
-    )
-    await notify_admins(admin_text)
-
-    client_text = (
-        "🔁 Ваш запис перенесено адміністратором.\n\n"
-        f"Було: {fmt_dt(old_d, old_t)}\n"
-        f"Стало: {fmt_dt(new_d, new_t)}\n"
-        f"💅 Послуга: {bk['service']}{extra}\n\n"
-        "Якщо час не підходить — напишіть адміну або перенесіть через «Мої записи»."
-    )
-    await notify_client(bk["user_id"], client_text)
-
-    await call.answer()
-
-
-# ================== COMMON ==================
 @dp.callback_query(F.data == "noop")
 async def noop(call: CallbackQuery):
     await call.answer()
@@ -1387,15 +904,11 @@ async def cleanup_loop():
 # ================== MAIN ==================
 async def main():
     await ensure_schema()
-
-    # one-time cleanup on start
     await cleanup_past_month_slots()
-
-    # background cleanup
     asyncio.create_task(cleanup_loop())
 
-    print("VERSION: autocleanup past month + calendar blocks past dates", flush=True)
-    print("=== BOT STARTED (polling) ===", flush=True)
+    print(f"DB_PATH = {DB_PATH}", flush=True)
+    print("VERSION: persistent sqlite on /data volume", flush=True)
     await dp.start_polling(bot)
 
 
