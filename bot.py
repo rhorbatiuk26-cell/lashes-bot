@@ -116,10 +116,29 @@ def fmt_date_ua(d_iso: str) -> str:
 
 
 def times_for_date(d: date) -> list[str]:
-    # Saturday = 5
-    if d.weekday() == 5:
-        return SATURDAY_TIMES
-    return DEFAULT_TIMES
+    wd = d.weekday()
+
+    # Вівторок (1)
+    if wd == 1:
+        return ["09:30", "11:30", "13:30"]
+
+    # Середа (2) ✅ змінено
+    if wd == 2:
+        return ["09:30", "14:00"]
+
+    # Четвер (3)
+    if wd == 3:
+        return ["09:30", "11:30", "13:30"]
+
+    # Пʼятниця (4) ✅ змінено
+    if wd == 4:
+        return ["09:30", "14:00"]
+
+    # Субота (5)
+    if wd == 5:
+        return ["11:00", "13:00", "15:00"]
+
+    return []
 
 
 def month_key(y: int, m: int) -> str:
