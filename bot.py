@@ -61,7 +61,7 @@ REMIND_HOUR_DELTA = timedelta(hours=1)
 # Auto-clean (hide past dates)
 CLEANUP_EVERY_HOURS = 6
 
-VERSION = "FULL ALL-IN-ONE v12weeks + admin buttons fixed"
+VERSION = "FULL ALL-IN-ONE v12weeks + admin buttons fixed + cancel UI fixed"
 
 
 # ================== HELPERS ==================
@@ -433,8 +433,8 @@ async def notify_admins(text: str):
     for cid in admin_chat_ids():
         try:
             await bot.send_message(cid, text)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"Помилка відправки повідомлення адміну {cid}: {e}", flush=True)
 
 
 # ================== UI (Reply keyboard) ==================
@@ -541,7 +541,6 @@ def kb_times(d: str, times: list[str], prefix: str) -> InlineKeyboardMarkup:
 
 
 def kb_admin_menu() -> InlineKeyboardMarkup:
-    # ✅ callback_data exactly matches handlers below
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"📅 Додати графік пачкою ({DEFAULT_WEEKS} тижнів)", callback_data="a:bulk")],
         [InlineKeyboardButton(text="➕ Додати слот вручну", callback_data="a:addslot")],
@@ -854,13 +853,27 @@ async def u_confirm(call: CallbackQuery, state: FSMContext):
 async def u_cancel_booking(call: CallbackQuery, state: FSMContext):
     bid = int(call.data.split(":")[-1])
     bk = await get_booking(bid)
+    
     if not bk or bk["user_id"] != call.from_user.id:
         await call.answer("Не знайдено запис.", show_alert=True)
         return
 
+    # Запобігаємо дублюванню дій, якщо клієнт вже скасував його (наприклад, натиснув кнопку двічі)
+    if bk["status"] == "canceled":
+        await call.answer("Цей запис вже було скасовано!", show_alert=True)
+        # Оновлюємо інтерфейс для поточного повідомлення
+        items = await get_user_active_bookings(call.from_user.id)
+        if not items:
+            await call.message.edit_text("У вас немає активних записів.")
+        else:
+            await call.message.edit_text("Ваші активні записи:", reply_markup=kb_user_my(items))
+        return
+
     ok, d, t = await cancel_booking(bid)
     if ok:
-        await call.message.answer(f"✅ Ваш запис скасовано: {fmt_date_ua(d)} {t}")
+        await call.answer("✅ Ваш запис скасовано!", show_alert=True)
+        
+        # Відправляємо сповіщення адміну ОДИН РАЗ
         await notify_admins(
             "📤 СКАСУВАННЯ КЛІЄНТОМ\n\n"
             f"Запис #{bid}\n"
@@ -870,9 +883,16 @@ async def u_cancel_booking(call: CallbackQuery, state: FSMContext):
             f"📞 {bk['phone']}\n"
             f"🔗 @{bk['username'] or '-'} | id:{bk['user_id']}"
         )
+        
+        # Миттєво редагуємо поточне повідомлення клієнта, щоб кнопка запису зникла!
+        items = await get_user_active_bookings(call.from_user.id)
+        if not items:
+            await call.message.edit_text(f"✅ Запис на {fmt_date_ua(d)} {t} скасовано.\n\nУ вас більше немає активних записів.")
+        else:
+            await call.message.edit_text(f"✅ Запис на {fmt_date_ua(d)} {t} скасовано.\n\nВаші активні записи:", reply_markup=kb_user_my(items))
+            
     else:
-        await call.message.answer("❌ Не знайшов запис.")
-    await call.answer()
+        await call.answer("❌ Не вдалося скасувати запис.", show_alert=True)
 
 
 # ================== ADMIN ==================
@@ -985,14 +1005,17 @@ async def a_cancel(call: CallbackQuery):
         return
     bid = int(call.data.split(":")[-1])
     bk = await get_booking(bid)
+    
+    if bk and bk["status"] == "canceled":
+        await call.answer("Цей запис вже скасовано!", show_alert=True)
+        return
 
     ok, d, t = await cancel_booking(bid)
     if not ok:
-        await call.message.answer("❌ Не знайшов запис.")
-        await call.answer()
+        await call.answer("❌ Не знайшов запис.", show_alert=True)
         return
 
-    await call.message.answer(f"✅ Запис #{bid} скасовано. Слот {fmt_date_ua(d)} {t} відкрито.")
+    await call.answer(f"✅ Запис #{bid} скасовано.", show_alert=True)
     await notify_admins(f"🛠 АДМІН СКАСУВАВ ЗАПИС #{bid}\n📅 {fmt_date_ua(d)}\n🕒 {t}")
 
     # notify client
@@ -1005,7 +1028,18 @@ async def a_cancel(call: CallbackQuery):
         except Exception:
             pass
 
-    await call.answer()
+    # Оновлення інтерфейсу адміністратора
+    bookings = await get_day_bookings(d)
+    lines = [f"📌 Записи на {fmt_date_ua(d)}:"]
+    if not bookings:
+        lines.append("— немає")
+    else:
+        for b_k in bookings:
+            st = "✅" if b_k["status"] == "active" else "🚫"
+            extra = f" ({b_k['ext_type']})" if b_k["ext_type"] else ""
+            lines.append(f"{st} {b_k['t']} — {b_k['client_name']} {b_k['phone']} — {b_k['service']}{extra}")
+
+    await call.message.edit_text("\n".join(lines), reply_markup=kb_admin_day_actions(d, bookings))
 
 
 @dp.callback_query(F.data.startswith("a:move:"))
