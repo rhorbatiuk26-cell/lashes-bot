@@ -45,8 +45,9 @@ ADMIN_CONTACT_USERNAME = (os.getenv("ADMIN_CONTACT_USERNAME") or "").strip().lst
 DEFAULT_WEEKS = 12  # ✅ 12 weeks пачкою
 WORKING_DAYS = {1, 2, 3, 4, 5}  # Tue-Sat (Mon=0..Sun=6)
 
-DEFAULT_TIMES = ["09:30", "11:30", "13:30"]      # Tue–Fri
-SATURDAY_TIMES = ["11:00", "13:00", "15:00"]     # ✅ Sat
+# Оновлено текст для сповіщення адміна про додані пачки
+DEFAULT_TIMES = ["09:30", "11:30"]       # Орієнтовно для тексту
+SATURDAY_TIMES = ["11:00", "13:00", "15:00"]
 
 # Services
 SERV_LAMI = "Ламінування"
@@ -61,7 +62,7 @@ REMIND_HOUR_DELTA = timedelta(hours=1)
 # Auto-clean (hide past dates)
 CLEANUP_EVERY_HOURS = 6
 
-VERSION = "FULL ALL-IN-ONE v12weeks + admin buttons fixed + cancel UI fixed"
+VERSION = "FULL ALL-IN-ONE v12weeks + updated schedule (Tue/Thu -13:30, Wed/Fri 11:30)"
 
 
 # ================== HELPERS ==================
@@ -118,21 +119,21 @@ def fmt_date_ua(d_iso: str) -> str:
 def times_for_date(d: date) -> list[str]:
     wd = d.weekday()
 
-    # Вівторок (1)
+    # Вівторок (1) - видалили 13:30
     if wd == 1:
-        return ["09:30", "11:30", "13:30"]
+        return ["09:30", "11:30"]
 
-    # Середа (2) ✅ змінено
+    # Середа (2) - змінено на 11:30
     if wd == 2:
-        return ["09:30", "14:00"]
+        return ["11:30"]
 
-    # Четвер (3)
+    # Четвер (3) - видалили 13:30
     if wd == 3:
-        return ["09:30", "11:30", "13:30"]
+        return ["09:30", "11:30"]
 
-    # Пʼятниця (4) ✅ змінено
+    # Пʼятниця (4) - змінено на 11:30
     if wd == 4:
-        return ["09:30", "14:00"]
+        return ["11:30"]
 
     # Субота (5)
     if wd == 5:
@@ -163,20 +164,13 @@ def shift_month(y: int, m: int, delta: int) -> tuple[int, int]:
 
 
 def parse_dt_from_callback(call_data: str) -> tuple[str, str]:
-    """
-    Finds date and time from callback.
-    Supports time encoded as HH:MM or HH:MM split by ':'.
-    """
     parts = (call_data or "").split(":")
-    # try patterns ending with YYYY-MM-DD:HH:MM
     for i in range(len(parts) - 1, -1, -1):
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", parts[i]):
-            # YYYY-MM-DD : HH : MM
             if i + 2 < len(parts):
                 hh, mm = parts[i + 1], parts[i + 2]
                 if re.fullmatch(r"[0-2]\d", hh) and re.fullmatch(r"[0-5]\d", mm):
                     return parts[i], f"{hh}:{mm}"
-            # YYYY-MM-DD : HH:MM
             if i + 1 < len(parts) and re.fullmatch(r"([01]\d|2[0-3]):[0-5]\d", parts[i + 1]):
                 return parts[i], parts[i + 1]
     return "", ""
@@ -225,7 +219,6 @@ async def ensure_schema():
         )
         """)
 
-        # reminders log (avoid duplicates)
         await db.execute("""
         CREATE TABLE IF NOT EXISTS reminders (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -293,7 +286,6 @@ async def get_slots_day(d: str) -> list[dict]:
 
 
 async def delete_open_slot(slot_id: int) -> bool:
-    """delete only if open"""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT is_open FROM slots WHERE id=?", (slot_id,))
         row = await cur.fetchone()
@@ -382,7 +374,6 @@ async def cancel_booking(booking_id: int) -> tuple[bool, str, str]:
 
 
 async def move_booking(booking_id: int, new_d: str, new_t: str) -> tuple[bool, str, str, str, str]:
-    """returns ok, old_d, old_t, new_d, new_t"""
     async with aiosqlite.connect(DB_PATH) as db:
         cur = await db.execute("SELECT d,t,status FROM bookings WHERE id=?", (booking_id,))
         row = await cur.fetchone()
@@ -435,8 +426,6 @@ async def notify_admins(text: str):
             await bot.send_message(cid, text)
         except Exception as e:
             print(f"Помилка відправки повідомлення адміну {cid}: {e}", flush=True)
-
-
 # ================== UI (Reply keyboard) ==================
 def rk_main(is_admin: bool) -> ReplyKeyboardMarkup:
     rows = [
@@ -780,7 +769,7 @@ async def u_phone(message: Message, state: FSMContext):
         "Перевірте запис 👇\n\n"
         f"📅 Дата: {fmt_date_ua(data['day'])}\n"
         f"🕒 Час: {data['time']}\n"
-        f"💅 Послуга: {data['service']}{f' ({data.get('ext_type')})' if data.get('ext_type') else ''}\n"
+        f"💅 Послуга: {data['service']}{f' ({data.get("ext_type")})' if data.get('ext_type') else ''}\n"
         f"👤 Клієнт: {data['client_name']}\n"
         f"📞 Телефон: {data['phone']}\n\n"
         "Підтверджуєте?"
@@ -833,13 +822,13 @@ async def u_confirm(call: CallbackQuery, state: FSMContext):
         "✅ Запис підтверджено!\n"
         f"Дата: {fmt_date_ua(data['day'])}\n"
         f"Час: {data['time']}\n"
-        f"Послуга: {data['service']}{f' ({data.get('ext_type')})' if data.get('ext_type') else ''}"
+        f"Послуга: {data['service']}{f' ({data.get("ext_type")})' if data.get('ext_type') else ''}"
     )
     await notify_admins(
         "📥 НОВИЙ ЗАПИС\n\n"
         f"📅 {fmt_date_ua(data['day'])}\n"
         f"🕒 {data['time']}\n"
-        f"💅 {data['service']}{f' ({data.get('ext_type')})' if data.get('ext_type') else ''}\n"
+        f"💅 {data['service']}{f' ({data.get("ext_type")})' if data.get('ext_type') else ''}\n"
         f"👤 {data['client_name']}\n"
         f"📞 {data['phone']}\n"
         f"🔗 @{call.from_user.username or '-'} | id:{call.from_user.id}"
@@ -858,10 +847,9 @@ async def u_cancel_booking(call: CallbackQuery, state: FSMContext):
         await call.answer("Не знайдено запис.", show_alert=True)
         return
 
-    # Запобігаємо дублюванню дій, якщо клієнт вже скасував його (наприклад, натиснув кнопку двічі)
+    # Запобігаємо дублюванню дій, якщо клієнт вже скасував його
     if bk["status"] == "canceled":
         await call.answer("Цей запис вже було скасовано!", show_alert=True)
-        # Оновлюємо інтерфейс для поточного повідомлення
         items = await get_user_active_bookings(call.from_user.id)
         if not items:
             await call.message.edit_text("У вас немає активних записів.")
@@ -873,7 +861,6 @@ async def u_cancel_booking(call: CallbackQuery, state: FSMContext):
     if ok:
         await call.answer("✅ Ваш запис скасовано!", show_alert=True)
         
-        # Відправляємо сповіщення адміну ОДИН РАЗ
         await notify_admins(
             "📤 СКАСУВАННЯ КЛІЄНТОМ\n\n"
             f"Запис #{bid}\n"
@@ -884,7 +871,6 @@ async def u_cancel_booking(call: CallbackQuery, state: FSMContext):
             f"🔗 @{bk['username'] or '-'} | id:{bk['user_id']}"
         )
         
-        # Миттєво редагуємо поточне повідомлення клієнта, щоб кнопка запису зникла!
         items = await get_user_active_bookings(call.from_user.id)
         if not items:
             await call.message.edit_text(f"✅ Запис на {fmt_date_ua(d)} {t} скасовано.\n\nУ вас більше немає активних записів.")
@@ -917,7 +903,8 @@ async def a_bulk(call: CallbackQuery):
         f"Додано слотів: {added}\n"
         f"Вже існували (пропущено): {skipped}\n\n"
         f"Період: {DEFAULT_WEEKS} тижнів\n"
-        f"Вт–Пт: {', '.join(DEFAULT_TIMES)}\n"
+        f"Вт, Чт: {', '.join(['09:30', '11:30'])}\n"
+        f"Ср, Пт: 11:30\n"
         f"Сб: {', '.join(SATURDAY_TIMES)}"
     )
     await call.answer()
@@ -1018,7 +1005,6 @@ async def a_cancel(call: CallbackQuery):
     await call.answer(f"✅ Запис #{bid} скасовано.", show_alert=True)
     await notify_admins(f"🛠 АДМІН СКАСУВАВ ЗАПИС #{bid}\n📅 {fmt_date_ua(d)}\n🕒 {t}")
 
-    # notify client
     if bk and bk["user_id"]:
         try:
             await bot.send_message(
@@ -1028,7 +1014,6 @@ async def a_cancel(call: CallbackQuery):
         except Exception:
             pass
 
-    # Оновлення інтерфейсу адміністратора
     bookings = await get_day_bookings(d)
     lines = [f"📌 Записи на {fmt_date_ua(d)}:"]
     if not bookings:
@@ -1101,7 +1086,6 @@ async def a_move_time(call: CallbackQuery):
         f"Стало: {fmt_date_ua(new_d)} {new_t}"
     )
 
-    # notify client
     if bk and bk["user_id"]:
         try:
             await bot.send_message(
@@ -1151,7 +1135,6 @@ async def a_del_slot(call: CallbackQuery):
     if not is_admin_username(call):
         await call.answer("Нема доступу", show_alert=True)
         return
-    # a:del_slot:<slot_id>:<YYYY-MM-DD>
     parts = call.data.split(":")
     slot_id = int(parts[2])
     d = parts[3] if len(parts) > 3 else ""
@@ -1185,7 +1168,6 @@ async def reminders_loop():
     while True:
         try:
             now = datetime.now(TZ)
-            # check active bookings in next ~2 days
             async with aiosqlite.connect(DB_PATH) as db:
                 cur = await db.execute("""
                     SELECT id, user_id, client_name, phone, service, ext_type, d, t
@@ -1202,9 +1184,8 @@ async def reminders_loop():
 
                 delta = dt - now
                 if delta.total_seconds() <= 0:
-                    continue  # already in past
+                    continue  
 
-                # day reminder
                 if abs(delta - REMIND_DAY_DELTA) <= timedelta(minutes=2):
                     if not await reminder_sent(bid, "day"):
                         try:
@@ -1222,7 +1203,6 @@ async def reminders_loop():
                             pass
                         await mark_reminder_sent(bid, "day")
 
-                # hour reminder
                 if abs(delta - REMIND_HOUR_DELTA) <= timedelta(minutes=2):
                     if not await reminder_sent(bid, "hour"):
                         try:
