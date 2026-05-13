@@ -45,8 +45,7 @@ ADMIN_CONTACT_USERNAME = (os.getenv("ADMIN_CONTACT_USERNAME") or "").strip().lst
 DEFAULT_WEEKS = 12  # ✅ 12 weeks пачкою
 WORKING_DAYS = {1, 2, 3, 4, 5}  # Tue-Sat (Mon=0..Sun=6)
 
-# Оновлено текст для сповіщення адміна про додані пачки
-DEFAULT_TIMES = ["09:30", "11:30"]       # Орієнтовно для тексту
+# Для сповіщення адміна про додані пачки
 SATURDAY_TIMES = ["11:00", "13:00", "15:00"]
 
 # Services
@@ -62,7 +61,7 @@ REMIND_HOUR_DELTA = timedelta(hours=1)
 # Auto-clean (hide past dates)
 CLEANUP_EVERY_HOURS = 6
 
-VERSION = "FULL ALL-IN-ONE v12weeks + updated schedule (Tue/Thu -13:30, Wed/Fri 11:30)"
+VERSION = "FULL ALL-IN-ONE v12weeks + updated schedule (Wed/Fri 13:30, Tue/Thu no 13:30)"
 
 
 # ================== HELPERS ==================
@@ -119,21 +118,21 @@ def fmt_date_ua(d_iso: str) -> str:
 def times_for_date(d: date) -> list[str]:
     wd = d.weekday()
 
-    # Вівторок (1) - видалили 13:30
+    # Вівторок (1)
     if wd == 1:
         return ["09:30", "11:30"]
 
-    # Середа (2) - змінено на 11:30
+    # Середа (2)
     if wd == 2:
-        return ["11:30"]
+        return ["09:30", "13:30"]
 
-    # Четвер (3) - видалили 13:30
+    # Четвер (3)
     if wd == 3:
         return ["09:30", "11:30"]
 
-    # Пʼятниця (4) - змінено на 11:30
+    # Пʼятниця (4)
     if wd == 4:
-        return ["11:30"]
+        return ["09:30", "13:30"]
 
     # Субота (5)
     if wd == 5:
@@ -903,8 +902,8 @@ async def a_bulk(call: CallbackQuery):
         f"Додано слотів: {added}\n"
         f"Вже існували (пропущено): {skipped}\n\n"
         f"Період: {DEFAULT_WEEKS} тижнів\n"
-        f"Вт, Чт: {', '.join(['09:30', '11:30'])}\n"
-        f"Ср, Пт: 11:30\n"
+        f"Вт, Чт: 09:30, 11:30\n"
+        f"Ср, Пт: 09:30, 13:30\n"
         f"Сб: {', '.join(SATURDAY_TIMES)}"
     )
     await call.answer()
